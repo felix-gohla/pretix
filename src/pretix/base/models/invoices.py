@@ -10,6 +10,7 @@ from django.utils.functional import cached_property
 from django.utils.translation import pgettext
 from django_countries.fields import CountryField
 
+from pretix.base.decimal import round_decimal
 
 def invoice_filename(instance, filename: str) -> str:
     secret = get_random_string(length=16, allowed_chars=string.ascii_letters + string.digits)
@@ -238,7 +239,7 @@ class InvoiceLine(models.Model):
 
     @property
     def unit_net_value(self):
-        return self.net_value / self.quantity
+        return round_decimal(self.net_value / Decimal(self.quantity), currency=self.invoice.event.currency)
 
     class Meta:
         ordering = ('position', 'pk')

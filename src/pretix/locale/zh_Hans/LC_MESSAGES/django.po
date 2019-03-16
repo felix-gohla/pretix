@@ -7,7 +7,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PACKAGE VERSION\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2019-03-16 18:14+0000\n"
+"POT-Creation-Date: 2019-03-16 22:25+0000\n"
 "PO-Revision-Date: 2019-03-15 07:55+0000\n"
 "Last-Translator: 徐志能 <770707469@qq.com>\n"
 "Language-Team: Chinese (Simplified) <https://translate.pretix.eu/projects/"
@@ -1183,7 +1183,7 @@ msgid "Qty"
 msgstr "数量"
 
 #: pretix/base/invoice.py:457 pretix/base/invoice.py:520
-#: pretix/base/invoice.py:655 pretix/base/invoice.py:734
+#: pretix/base/invoice.py:656 pretix/base/invoice.py:734
 msgctxt "invoice"
 msgid "Tax rate"
 msgstr "税率"
@@ -1253,9 +1253,14 @@ msgctxt "invoice"
 msgid "Classic combining renderer (pretix 1.0)"
 msgstr "经典渲染器（pretix 1.0）"
 
-#: pretix/base/invoice.py:656
+#: pretix/base/invoice.py:655
 msgctxt "invoice"
 msgid "Unit Net"
+msgstr ""
+
+#: pretix/base/invoice.py:664
+msgctxt "invoice"
+msgid "Unit"
 msgstr ""
 
 #: pretix/base/migrations/0077_auto_20171124_1629.py:33
@@ -3083,7 +3088,7 @@ msgid "123.45 EUR"
 msgstr "123.45 欧元"
 
 #: pretix/base/pdf.py:92 pretix/base/pdf.py:178
-#: pretix/base/services/invoices.py:324 pretix/control/views/event.py:627
+#: pretix/base/services/invoices.py:329 pretix/control/views/event.py:627
 #: pretix/control/views/event.py:692 pretix/plugins/sendmail/views.py:102
 msgid "John Doe"
 msgstr "John Doe"
@@ -3497,7 +3502,7 @@ msgctxt "subevent"
 msgid "Date: {}"
 msgstr "日期：{}"
 
-#: pretix/base/services/invoices.py:175
+#: pretix/base/services/invoices.py:180
 msgctxt "invoice"
 msgid ""
 "Reverse Charge: According to Article 194, 196 of Council Directive 2006/112/"
@@ -3505,27 +3510,27 @@ msgid ""
 msgstr ""
 "反向收费：根据理事会指令2006/112 / EEC第194,196条，增值税应该由服务对象承担。"
 
-#: pretix/base/services/invoices.py:318
+#: pretix/base/services/invoices.py:323
 msgid "A payment provider specific text might appear here."
 msgstr "此处可能会显示支付提供商特定的文本。"
 
-#: pretix/base/services/invoices.py:325
+#: pretix/base/services/invoices.py:330
 msgid "214th Example Street"
 msgstr "214号示例街道"
 
-#: pretix/base/services/invoices.py:326
+#: pretix/base/services/invoices.py:331
 msgid "012345"
 msgstr "012345"
 
-#: pretix/base/services/invoices.py:327
+#: pretix/base/services/invoices.py:332
 msgid "Sample city"
 msgstr "代表城市"
 
-#: pretix/base/services/invoices.py:342
+#: pretix/base/services/invoices.py:347
 msgid "Sample product {}"
 msgstr "样本产品{}"
 
-#: pretix/base/services/invoices.py:348
+#: pretix/base/services/invoices.py:353
 msgid "Sample product A"
 msgstr "样本产品 A"
 

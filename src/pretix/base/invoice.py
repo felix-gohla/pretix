@@ -643,6 +643,7 @@ class ClassicCombiningInvoiceRenderer(ClassicInvoiceRenderer):
             ('VALIGN', (0, 0), (-1, -1), 'TOP'),
             ('FONTNAME', (0, 0), (-1, 0), self.font_bold),
             ('FONTNAME', (0, -1), (-1, -1), self.font_bold),
+            ('FONTSIZE', (0, 0), (-1, -1), 9),
             ('LEFTPADDING', (0, 0), (0, -1), 0),
             ('RIGHTPADDING', (-1, 0), (-1, -1), 0),
             ('LEFTPADDING', (1, 0), (-2, -1), 0),
@@ -652,8 +653,8 @@ class ClassicCombiningInvoiceRenderer(ClassicInvoiceRenderer):
             tdata = [(
                 pgettext('invoice', 'Description'),
                 pgettext('invoice', 'Qty'),
-                pgettext('invoice', 'Tax rate'),
                 pgettext('invoice', 'Unit Net'),
+                pgettext('invoice', 'Tax rate'),
                 pgettext('invoice', 'Net'),
                 pgettext('invoice', 'Gross'),
             )]
@@ -661,7 +662,7 @@ class ClassicCombiningInvoiceRenderer(ClassicInvoiceRenderer):
             tdata = [(
                 pgettext('invoice', 'Description'),
                 pgettext('invoice', 'Qty'),
-                'Einzelpreis',
+                pgettext('invoice', 'Unit'),
                 pgettext('invoice', 'Amount'),
             )]
 
@@ -669,11 +670,13 @@ class ClassicCombiningInvoiceRenderer(ClassicInvoiceRenderer):
 
         for line in self.invoice.lines.all():
             if has_taxes:
+                print(type(line.unit_net_value))
+                print(type(line.gross_value))
                 tdata.append((
                     Paragraph(line.description, self.stylesheet['Normal']),
                     str(line.quantity),
-                    localize(line.tax_rate) + " %",
                     money_filter(line.unit_net_value, self.invoice.event.currency),
+                    localize(line.tax_rate) + " %",
                     money_filter(line.net_value, self.invoice.event.currency),
                     money_filter(line.gross_value, self.invoice.event.currency),
                 ))
@@ -703,7 +706,7 @@ class ClassicCombiningInvoiceRenderer(ClassicInvoiceRenderer):
             tdata.append([
                 pgettext('invoice', 'Invoice total'), '', '', '', '', money_filter(total, self.invoice.event.currency)
             ])
-            colwidths = [a * doc.width for a in (.47, .05, .13, .15, .15, .15)]
+            colwidths = [a * doc.width for a in (.37, .05, .15, .13, .15, .15)]
         else:
             tdata.append([
                 pgettext('invoice', 'Invoice total'), '', '', money_filter(total, self.invoice.event.currency)

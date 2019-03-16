@@ -616,7 +616,7 @@ class OrderCreateSerializer(I18nAwareModelSerializer):
 class InlineInvoiceLineSerializer(I18nAwareModelSerializer):
     class Meta:
         model = InvoiceLine
-        fields = ('description', 'gross_value', 'tax_value', 'tax_rate', 'tax_name')
+        fields = ('description', 'quantity', 'gross_value', 'tax_value', 'tax_rate', 'tax_name')
 
 
 class InvoiceSerializer(I18nAwareModelSerializer):

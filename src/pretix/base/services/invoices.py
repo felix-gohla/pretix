@@ -22,7 +22,7 @@ from pretix.base.i18n import language
 from pretix.base.models import (
     Invoice, InvoiceAddress, InvoiceLine, Order, OrderPayment,
 )
-from pretix.base.models.tax import EU_CURRENCIES
+from pretix.base.models.tax import EU_CURRENCIES, TaxRule
 from pretix.base.services.tasks import TransactionAwareTask
 from pretix.base.settings import GlobalSettingsObject
 from pretix.base.signals import periodic_task
@@ -153,14 +153,19 @@ def build_invoice(invoice: Invoice) -> Invoice:
             if invoice.event.has_subevents:
                 desc += "<br />" + pgettext("subevent", "Date: {}").format(p.subevent)
 
-            tax = p.tax_rule.tax(p.price * quantity)
+            tax_value = p.tax_value
+            if p.tax_rule:
+              tr = TaxRule.zero()
+              tr.event = invoice.event
+              tr.rate = p.tax_rate
+              tax_value = tr.tax(quantity * p.price, base_price_is='gross').tax
 
             InvoiceLine.objects.create(
                 position=idx, invoice=invoice, description=desc,
                 quantity=quantity,
-                gross_value=tax.gross, tax_value=tax.tax,
+                gross_value=p.price * quantity, tax_value=tax_value,
                 subevent=p.subevent, event_date_from=(p.subevent.date_from if p.subevent else invoice.event.date_from),
-                tax_rate=tax.rate, tax_name=p.tax_rule.name if p.tax_rule else ''
+                tax_rate=p.tax_rate, tax_name=p.tax_rule.name if p.tax_rule else ''
             )
 
             if p.tax_rule and p.tax_rule.is_reverse_charge(ia) and p.price and not p.tax_value:

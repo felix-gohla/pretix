@@ -3,7 +3,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: 1\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2019-03-16 18:14+0000\n"
+"POT-Creation-Date: 2019-03-16 22:25+0000\n"
 "PO-Revision-Date: 2019-01-16 22:00+0000\n"
 "Last-Translator: Guillaume Petit <gpetit@edelzone.fr>\n"
 "Language-Team: French <https://translate.pretix.eu/projects/pretix/pretix/fr/"
@@ -1305,7 +1305,7 @@ msgid "Qty"
 msgstr "Qté"
 
 #: pretix/base/invoice.py:457 pretix/base/invoice.py:520
-#: pretix/base/invoice.py:655 pretix/base/invoice.py:734
+#: pretix/base/invoice.py:656 pretix/base/invoice.py:734
 msgctxt "invoice"
 msgid "Tax rate"
 msgstr "Taux d'imposition"
@@ -1379,9 +1379,14 @@ msgctxt "invoice"
 msgid "Classic combining renderer (pretix 1.0)"
 msgstr "Rendu classique (pretix 1.0)"
 
-#: pretix/base/invoice.py:656
+#: pretix/base/invoice.py:655
 msgctxt "invoice"
 msgid "Unit Net"
+msgstr ""
+
+#: pretix/base/invoice.py:664
+msgctxt "invoice"
+msgid "Unit"
 msgstr ""
 
 #: pretix/base/migrations/0077_auto_20171124_1629.py:33
@@ -3384,7 +3389,7 @@ msgid "123.45 EUR"
 msgstr "123,45 EUR"
 
 #: pretix/base/pdf.py:92 pretix/base/pdf.py:178
-#: pretix/base/services/invoices.py:324 pretix/control/views/event.py:627
+#: pretix/base/services/invoices.py:329 pretix/control/views/event.py:627
 #: pretix/control/views/event.py:692 pretix/plugins/sendmail/views.py:102
 msgid "John Doe"
 msgstr "John Doe"
@@ -3844,7 +3849,7 @@ msgctxt "subevent"
 msgid "Date: {}"
 msgstr "Date: {}"
 
-#: pretix/base/services/invoices.py:175
+#: pretix/base/services/invoices.py:180
 msgctxt "invoice"
 msgid ""
 "Reverse Charge: According to Article 194, 196 of Council Directive 2006/112/"
@@ -3854,11 +3859,11 @@ msgstr ""
 "CEE du Conseil, l'assujettissement à la TVA incombe au destinataire du "
 "service."
 
-#: pretix/base/services/invoices.py:318
+#: pretix/base/services/invoices.py:323
 msgid "A payment provider specific text might appear here."
 msgstr "Un texte spécifique au prestataire de paiement peut apparaître ici."
 
-#: pretix/base/services/invoices.py:325
+#: pretix/base/services/invoices.py:330
 #, fuzzy
 #| msgid ""
 #| "John Doe\n"
@@ -3870,21 +3875,21 @@ msgstr ""
 "214 Rue de la Croix\n"
 "99000 Ville"
 
-#: pretix/base/services/invoices.py:326
+#: pretix/base/services/invoices.py:331
 msgid "012345"
 msgstr ""
 
-#: pretix/base/services/invoices.py:327
+#: pretix/base/services/invoices.py:332
 #, fuzzy
 #| msgid "Sample company"
 msgid "Sample city"
 msgstr "Exemple d'entreprise"
 
-#: pretix/base/services/invoices.py:342
+#: pretix/base/services/invoices.py:347
 msgid "Sample product {}"
 msgstr "Exemple de produit {}"
 
-#: pretix/base/services/invoices.py:348
+#: pretix/base/services/invoices.py:353
 msgid "Sample product A"
 msgstr "Exemple de produit A"
 
