@@ -1,0 +1,45 @@
+version: '3'
+services:
+  database:
+    image: postgres:9.6-alpine
+    container_name: database
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=pretix
+      - POSTGRES_PASSWORD=pretix
+    volumes:
+      - postgres:/var/lib/postgresql/data
+    networks:
+      - backend
+
+  redis:
+    image: redis:latest
+    container_name: cache
+    ports:
+      - "6379:6379"
+    networks:
+      - backend
+
+  pretix:
+    build: .
+    container_name: pretix
+    depends_on:
+      - database
+      - redis
+    ports:
+      - "8000:80"
+      - "8080:8080"
+    volumes:
+      - ./etc/pretix.cfg:/etc/pretix/pretix.cfg
+      - data:/data
+      - src:/pretix/src
+    networks:
+      - backend
+
+volumes:
+    data:
+    src:
+    postgres:
+networks:
+  backend:
