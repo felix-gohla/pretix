@@ -3,6 +3,7 @@ import logging
 import urllib.error
 from datetime import date, timedelta
 from decimal import ROUND_HALF_UP, Decimal
+from itertools import groupby
 
 import vat_moss.exchange_rates
 from django.conf import settings
@@ -125,8 +126,20 @@ def build_invoice(invoice: Invoice) -> Invoice:
 
         reverse_charge = False
 
+        def positions_kequal_key(p):
+            return (p.order, p.subevent, p.item, p.variation, p.price,
+                    p.attendee_name, p.attendee_email,
+                    p.tax_rate, p.tax_rule, p.tax_value,
+                    p.canceled)
+
         positions.sort(key=lambda p: p.sort_key)
-        for i, p in enumerate(positions):
+        grouped_positions = {k: list(g) for k, g in groupby(positions, positions_kequal_key)}
+
+        idx = -1
+        for positions in grouped_positions.values():
+            p = positions[0]
+            quantity = len(positions)
+
             if not invoice.event.settings.invoice_include_free and p.price == Decimal('0.00') and not p.addon_c:
                 continue
 
@@ -139,15 +152,20 @@ def build_invoice(invoice: Invoice) -> Invoice:
                 desc += "<br />" + pgettext("invoice", "Attendee: {name}").format(name=p.attendee_name)
             if invoice.event.has_subevents:
                 desc += "<br />" + pgettext("subevent", "Date: {}").format(p.subevent)
+
+            tax = p.tax_rule.tax(p.price * quantity)
+
             InvoiceLine.objects.create(
-                position=i, invoice=invoice, description=desc,
-                gross_value=p.price, tax_value=p.tax_value,
+                position=idx, invoice=invoice, description=desc,
+                quantity=quantity,
+                gross_value=tax.gross, tax_value=tax.tax,
                 subevent=p.subevent, event_date_from=(p.subevent.date_from if p.subevent else invoice.event.date_from),
-                tax_rate=p.tax_rate, tax_name=p.tax_rule.name if p.tax_rule else ''
+                tax_rate=tax.rate, tax_name=p.tax_rule.name if p.tax_rule else ''
             )
 
             if p.tax_rule and p.tax_rule.is_reverse_charge(ia) and p.price and not p.tax_value:
                 reverse_charge = True
+            idx += 1
 
         if reverse_charge:
             if invoice.additional_text:
@@ -319,16 +337,16 @@ def build_preview_invoice_pdf(event):
 
         if event.tax_rules.exists():
             for i, tr in enumerate(event.tax_rules.all()):
-                tax = tr.tax(Decimal('100.00'))
+                tax = tr.tax(Decimal('100.00') * 2)
                 InvoiceLine.objects.create(
                     invoice=invoice, description=_("Sample product {}").format(i + 1),
-                    gross_value=tax.gross, tax_value=tax.tax,
+                    quantity=2, gross_value=tax.gross, tax_value=tax.tax,
                     tax_rate=tax.rate
                 )
         else:
             InvoiceLine.objects.create(
                 invoice=invoice, description=_("Sample product A"),
-                gross_value=100, tax_value=0, tax_rate=0
+                quantity=2, gross_value=2 * 100, tax_value=0, tax_rate=0
             )
 
         return event.invoice_renderer.generate(invoice)

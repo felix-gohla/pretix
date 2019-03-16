@@ -206,6 +206,8 @@ class InvoiceLine(models.Model):
     :type invoice: Invoice
     :param description: The item description
     :type description: str
+    :param quantity: The number of equal positions being combined in one line
+    :type quantity: int
     :param gross_value: The gross value
     :type gross_value: decimal.Decimal
     :param tax_value: The included tax (as an absolute value)
@@ -222,6 +224,7 @@ class InvoiceLine(models.Model):
     invoice = models.ForeignKey('Invoice', related_name='lines', on_delete=models.CASCADE)
     position = models.PositiveIntegerField(default=0)
     description = models.TextField()
+    quantity = models.PositiveIntegerField(default=1)
     gross_value = models.DecimalField(max_digits=10, decimal_places=2)
     tax_value = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('0.00'))
     tax_rate = models.DecimalField(max_digits=7, decimal_places=2, default=Decimal('0.00'))
@@ -232,6 +235,10 @@ class InvoiceLine(models.Model):
     @property
     def net_value(self):
         return self.gross_value - self.tax_value
+
+    @property
+    def unit_net_value(self):
+        return self.net_value / self.quantity
 
     class Meta:
         ordering = ('position', 'pk')

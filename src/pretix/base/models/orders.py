@@ -42,7 +42,7 @@ logger = logging.getLogger(__name__)
 
 
 def generate_secret():
-    return get_random_string(length=16, allowed_chars=string.ascii_lowercase + string.digits)
+    return get_random_string(length=32, allowed_chars=string.ascii_lowercase + string.digits)
 
 
 def generate_position_secret():
@@ -138,7 +138,7 @@ class Order(LockModel, LoggedModel):
         null=True, blank=True, max_length=32,
         verbose_name=_('Locale')
     )
-    secret = models.CharField(max_length=32, default=generate_secret)
+    secret = models.CharField(max_length=64, default=generate_secret)
     datetime = models.DateTimeField(
         verbose_name=_("Date"), db_index=True
     )

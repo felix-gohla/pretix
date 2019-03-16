@@ -6,7 +6,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2019-03-14 14:35+0000\n"
+"POT-Creation-Date: 2019-03-16 18:14+0000\n"
 "PO-Revision-Date: 2018-04-24 14:22+0000\n"
 "Last-Translator: Pernille Thorsen <perth@aarhus.dk>\n"
 "Language-Team: Danish <https://translate.pretix.eu/projects/pretix/pretix-js/"
@@ -227,12 +227,14 @@ msgid "Count"
 msgstr "Antal"
 
 #: pretix/static/pretixcontrol/js/ui/question.js:120
-msgid "Ja"
+msgid "Yes"
 msgstr ""
 
 #: pretix/static/pretixcontrol/js/ui/question.js:121
-msgid "Nein"
-msgstr ""
+#, fuzzy
+#| msgid "None"
+msgid "No"
+msgstr "Ingen"
 
 #: pretix/static/pretixcontrol/js/ui/subevent.js:108
 msgid "(one more date)"

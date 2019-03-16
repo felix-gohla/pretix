@@ -7,7 +7,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PACKAGE VERSION\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2019-03-14 14:35+0000\n"
+"POT-Creation-Date: 2019-03-16 18:14+0000\n"
 "PO-Revision-Date: 2018-09-03 06:36+0000\n"
 "Last-Translator: Yunus Fırat Pişkin <firat.piskin@idvlabs.com>\n"
 "Language-Team: Turkish <https://translate.pretix.eu/projects/pretix/pretix-"
@@ -229,12 +229,14 @@ msgid "Count"
 msgstr "Saymak"
 
 #: pretix/static/pretixcontrol/js/ui/question.js:120
-msgid "Ja"
+msgid "Yes"
 msgstr ""
 
 #: pretix/static/pretixcontrol/js/ui/question.js:121
-msgid "Nein"
-msgstr ""
+#, fuzzy
+#| msgid "None"
+msgid "No"
+msgstr "Hiçbiri"
 
 #: pretix/static/pretixcontrol/js/ui/subevent.js:108
 msgid "(one more date)"

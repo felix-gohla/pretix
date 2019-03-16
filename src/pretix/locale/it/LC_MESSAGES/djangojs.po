@@ -7,7 +7,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PACKAGE VERSION\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2019-03-14 14:35+0000\n"
+"POT-Creation-Date: 2019-03-16 18:14+0000\n"
 "PO-Revision-Date: 2019-01-02 08:20+0000\n"
 "Last-Translator: amefad <fame@libero.it>\n"
 "Language-Team: Italian <https://translate.pretix.eu/projects/pretix/pretix-"
@@ -225,11 +225,11 @@ msgid "Count"
 msgstr ""
 
 #: pretix/static/pretixcontrol/js/ui/question.js:120
-msgid "Ja"
+msgid "Yes"
 msgstr ""
 
 #: pretix/static/pretixcontrol/js/ui/question.js:121
-msgid "Nein"
+msgid "No"
 msgstr ""
 
 #: pretix/static/pretixcontrol/js/ui/subevent.js:108
