@@ -135,7 +135,7 @@ def build_invoice(invoice: Invoice) -> Invoice:
         positions.sort(key=lambda p: p.sort_key)
         grouped_positions = {k: list(g) for k, g in groupby(positions, positions_kequal_key)}
 
-        idx = -1
+        idx = 0
         for positions in grouped_positions.values():
             p = positions[0]
             quantity = len(positions)
