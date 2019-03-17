@@ -778,6 +778,7 @@ TEST_INVOICE_RES = {
     "lines": [
         {
             "description": "Budget Ticket<br />Attendee: Peter",
+            "quantity": 1,
             "gross_value": "23.00",
             "tax_value": "0.00",
             "tax_name": "",
@@ -785,6 +786,7 @@ TEST_INVOICE_RES = {
         },
         {
             "description": "Payment fee",
+            "quantity": 1,
             "gross_value": "0.25",
             "tax_value": "0.05",
             "tax_name": "",

@@ -155,10 +155,10 @@ def build_invoice(invoice: Invoice) -> Invoice:
 
             tax_value = p.tax_value
             if p.tax_rule:
-              tr = TaxRule.zero()
-              tr.event = invoice.event
-              tr.rate = p.tax_rate
-              tax_value = tr.tax(quantity * p.price, base_price_is='gross').tax
+                tr = TaxRule.zero()
+                tr.event = invoice.event
+                tr.rate = p.tax_rate
+                tax_value = tr.tax(quantity * p.price, base_price_is='gross').tax
 
             InvoiceLine.objects.create(
                 position=idx, invoice=invoice, description=desc,

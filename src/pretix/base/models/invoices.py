@@ -12,6 +12,7 @@ from django_countries.fields import CountryField
 
 from pretix.base.decimal import round_decimal
 
+
 def invoice_filename(instance, filename: str) -> str:
     secret = get_random_string(length=16, allowed_chars=string.ascii_letters + string.digits)
     return 'invoices/{org}/{ev}/{no}-{code}-{secret}.{ext}'.format(
