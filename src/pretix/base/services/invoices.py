@@ -1,9 +1,9 @@
 import json
 import logging
 import urllib.error
+from collections import defaultdict
 from datetime import date, timedelta
 from decimal import ROUND_HALF_UP, Decimal
-from itertools import groupby
 
 import vat_moss.exchange_rates
 from django.conf import settings
@@ -126,14 +126,20 @@ def build_invoice(invoice: Invoice) -> Invoice:
 
         reverse_charge = False
 
-        def positions_kequal_key(p):
+        def positions_equal_key(p):
             return (p.order, p.subevent, p.item, p.variation, p.price,
                     p.attendee_name, p.attendee_email,
                     p.tax_rate, p.tax_rule, p.tax_value,
                     p.canceled)
 
+        def full_group_by(l, key=lambda x: x):
+            d = defaultdict(list)
+            for item in l:
+                d[key(item)].append(item)
+            return d.items()
+
         positions.sort(key=lambda p: p.sort_key)
-        grouped_positions = {k: list(g) for k, g in groupby(positions, positions_kequal_key)}
+        grouped_positions = {k: g for k, g in full_group_by(positions, positions_equal_key)}
 
         idx = 0
         for positions in grouped_positions.values():

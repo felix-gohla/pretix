@@ -670,8 +670,6 @@ class ClassicCombiningInvoiceRenderer(ClassicInvoiceRenderer):
 
         for line in self.invoice.lines.all():
             if has_taxes:
-                print(type(line.unit_net_value))
-                print(type(line.gross_value))
                 tdata.append((
                     Paragraph(line.description, self.stylesheet['Normal']),
                     str(line.quantity),
