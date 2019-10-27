@@ -1,5 +1,6 @@
 import sys
 import uuid
+from collections import Counter
 from datetime import date, datetime, time
 from decimal import Decimal, DecimalException
 from typing import Tuple
@@ -15,11 +16,15 @@ from django.utils.crypto import get_random_string
 from django.utils.functional import cached_property
 from django.utils.timezone import is_naive, make_aware, now
 from django.utils.translation import pgettext_lazy, ugettext_lazy as _
+from django_countries.fields import Country
+from django_scopes import ScopedManager
 from i18nfield.fields import I18nCharField, I18nTextField
 
 from pretix.base.models import fields
 from pretix.base.models.base import LoggedModel
+from pretix.base.models.fields import MultiStringField
 from pretix.base.models.tax import TaxedPrice
+from pretix.base.signals import quota_availability
 
 from .event import Event, SubEvent
 
@@ -153,28 +158,43 @@ class SubEventItemVariation(models.Model):
             self.subevent.event.cache.clear()
 
 
+def filter_available(qs, channel='web', voucher=None, allow_addons=False):
+    q = (
+        # IMPORTANT: If this is updated, also update the ItemVariation query
+        # in models/event.py: EventMixin.annotated()
+        Q(active=True)
+        & Q(Q(available_from__isnull=True) | Q(available_from__lte=now()))
+        & Q(Q(available_until__isnull=True) | Q(available_until__gte=now()))
+        & Q(sales_channels__contains=channel) & Q(require_bundling=False)
+    )
+    if not allow_addons:
+        q &= Q(Q(category__isnull=True) | Q(category__is_addon=False))
+
+    if voucher:
+        if voucher.item_id:
+            q &= Q(pk=voucher.item_id)
+        elif voucher.quota_id:
+            q &= Q(quotas__in=[voucher.quota_id])
+        else:
+            return qs.none()
+    if not voucher or not voucher.show_hidden_items:
+        q &= Q(hide_without_voucher=False)
+
+    return qs.filter(q)
+
+
 class ItemQuerySet(models.QuerySet):
     def filter_available(self, channel='web', voucher=None, allow_addons=False):
-        q = (
-            # IMPORTANT: If this is updated, also update the ItemVariation query
-            # in models/event.py: EventMixin.annotated()
-            Q(active=True)
-            & Q(Q(available_from__isnull=True) | Q(available_from__lte=now()))
-            & Q(Q(available_until__isnull=True) | Q(available_until__gte=now()))
-            & Q(sales_channels__contains=channel)
-        )
-        if not allow_addons:
-            q &= Q(Q(category__isnull=True) | Q(category__is_addon=False))
-        qs = self.filter(q)
+        return filter_available(self, channel, voucher, allow_addons)
 
-        vouchq = Q(hide_without_voucher=False)
-        if voucher:
-            if voucher.item_id:
-                vouchq |= Q(pk=voucher.item_id)
-                qs = qs.filter(pk=voucher.item_id)
-            elif voucher.quota_id:
-                qs = qs.filter(quotas__in=[voucher.quota_id])
-        return qs.filter(vouchq)
+
+class ItemQuerySetManager(ScopedManager(organizer='event__organizer').__class__):
+    def __init__(self):
+        super().__init__()
+        self._queryset_class = ItemQuerySet
+
+    def filter_available(self, channel='web', voucher=None, allow_addons=False):
+        return filter_available(self.get_queryset(), channel, voucher, allow_addons)
 
 
 class Item(LoggedModel):
@@ -222,9 +242,11 @@ class Item(LoggedModel):
     :type require_approval: bool
     :param sales_channels: Sales channels this item is available on.
     :type sales_channels: bool
+    :param issue_giftcard: If ``True``, buying this product will give you a gift card with the value of the product's price
+    :type issue_giftcard: bool
     """
 
-    objects = ItemQuerySet.as_manager()
+    objects = ItemQuerySetManager()
 
     event = models.ForeignKey(
         Event,
@@ -291,6 +313,16 @@ class Item(LoggedModel):
         verbose_name=_("Generate tickets"),
         blank=True, null=True,
     )
+    allow_waitinglist = models.BooleanField(
+        verbose_name=_("Show a waiting list for this ticket"),
+        help_text=_("This will only work of waiting lists are enabled for this event."),
+        default=True
+    )
+    show_quota_left = models.NullBooleanField(
+        verbose_name=_("Show number of tickets left"),
+        help_text=_("Publicly show how many tickets are still available."),
+        blank=True, null=True,
+    )
     position = models.IntegerField(
         default=0
     )
@@ -309,6 +341,17 @@ class Item(LoggedModel):
         null=True, blank=True,
         help_text=_('This product will not be sold after the given date.')
     )
+    hidden_if_available = models.ForeignKey(
+        'Quota',
+        null=True, blank=True,
+        on_delete=models.SET_NULL,
+        verbose_name=_("Only show after sellout of"),
+        help_text=_("If you select a quota here, this product will only be shown when that quota is "
+                    "unavailable. If combined with the option to hide sold-out products, this allows you to "
+                    "swap out products for more expensive ones once they are sold out. There might be a short period "
+                    "in which both products are visible while all tickets in the referenced quota are reserved, "
+                    "but not yet sold.")
+    )
     require_voucher = models.BooleanField(
         verbose_name=_('This product can only be bought using a voucher.'),
         default=False,
@@ -326,7 +369,14 @@ class Item(LoggedModel):
         verbose_name=_('This product will only be shown if a voucher matching the product is redeemed.'),
         default=False,
         help_text=_('This product will be hidden from the event page until the user enters a voucher '
-                    'code that is specifically tied to this product (and not via a quota).')
+                    'that unlocks this product.')
+    )
+    require_bundling = models.BooleanField(
+        verbose_name=_('Only sell this product as part of a bundle'),
+        default=False,
+        help_text=_('If this option is set, the product will only be sold as part of bundle products. Do '
+                    '<strong>not</strong> check this option if you want to use this product as an add-on product, '
+                    'but only for fixed bundles!')
     )
     allow_cancel = models.BooleanField(
         verbose_name=_('Allow product to be canceled'),
@@ -365,6 +415,12 @@ class Item(LoggedModel):
         verbose_name=_('Sales channels'),
         default=['web']
     )
+    issue_giftcard = models.BooleanField(
+        verbose_name=_('This product is a gift card'),
+        help_text=_('When a customer buys this product, they will get a gift card with a value corresponding to the '
+                    'product price.'),
+        default=False
+    )
     # !!! Attention: If you add new fields here, also add them to the copying code in
     # pretix/control/forms/item.py if applicable.
 
@@ -382,16 +438,39 @@ class Item(LoggedModel):
             self.event.cache.clear()
 
     def delete(self, *args, **kwargs):
+        self.vouchers.update(item=None, variation=None, quota=None)
         super().delete(*args, **kwargs)
         if self.event:
             self.event.cache.clear()
 
-    def tax(self, price=None, base_price_is='auto'):
+    @property
+    def do_show_quota_left(self):
+        if self.show_quota_left is None:
+            return self.event.settings.show_quota_left
+        return self.show_quota_left
+
+    def tax(self, price=None, base_price_is='auto', currency=None, include_bundled=False):
         price = price if price is not None else self.default_price
+
         if not self.tax_rule:
-            return TaxedPrice(gross=price, net=price, tax=Decimal('0.00'),
-                              rate=Decimal('0.00'), name='')
-        return self.tax_rule.tax(price, base_price_is=base_price_is)
+            t = TaxedPrice(gross=price, net=price, tax=Decimal('0.00'),
+                           rate=Decimal('0.00'), name='')
+        else:
+            t = self.tax_rule.tax(price, base_price_is=base_price_is, currency=currency)
+
+        if include_bundled:
+            for b in self.bundles.all():
+                if b.designated_price and b.bundled_item.tax_rule_id != self.tax_rule_id:
+                    if b.bundled_variation:
+                        bprice = b.bundled_variation.tax(b.designated_price * b.count, base_price_is='gross', currency=currency)
+                    else:
+                        bprice = b.bundled_item.tax(b.designated_price * b.count, base_price_is='gross', currency=currency)
+                    compare_price = self.tax_rule.tax(b.designated_price * b.count, base_price_is='gross', currency=currency)
+                    t.net += bprice.net - compare_price.net
+                    t.tax += bprice.tax - compare_price.tax
+                    t.name = "MIXED!"
+
+        return t
 
     def is_available_by_time(self, now_dt: datetime=None) -> bool:
         now_dt = now_dt or now()
@@ -411,7 +490,18 @@ class Item(LoggedModel):
             return False
         return True
 
-    def check_quotas(self, ignored_quotas=None, count_waitinglist=True, subevent=None, _cache=None):
+    def _get_quotas(self, ignored_quotas=None, subevent=None):
+        check_quotas = set(getattr(
+            self, '_subevent_quotas',  # Utilize cache in product list
+            self.quotas.filter(subevent=subevent).select_related('subevent')
+            if subevent else self.quotas.all()
+        ))
+        if ignored_quotas:
+            check_quotas -= set(ignored_quotas)
+        return check_quotas
+
+    def check_quotas(self, ignored_quotas=None, count_waitinglist=True, subevent=None, _cache=None,
+                     include_bundled=False, trust_parameters=False, fail_on_no_quotas=False):
         """
         This method is used to determine whether this Item is currently available
         for sale.
@@ -420,32 +510,61 @@ class Item(LoggedModel):
                                quotas will be ignored in the calculation. If this leads
                                to no quotas being checked at all, this method will return
                                unlimited availability.
+        :param include_bundled: Also take availability of bundled items into consideration.
+        :param trust_parameters: Disable checking of the subevent parameter and disable checking if
+                                 any variations exist (performance optimization).
         :returns: any of the return codes of :py:meth:`Quota.availability()`.
 
         :raises ValueError: if you call this on an item which has variations associated with it.
                             Please use the method on the ItemVariation object you are interested in.
         """
-        check_quotas = set(getattr(
-            self, '_subevent_quotas',  # Utilize cache in product list
-            self.quotas.select_related('subevent').filter(subevent=subevent)
-            if subevent else self.quotas.all()
-        ))
-        if not subevent and self.event.has_subevents:
+        if not trust_parameters and not subevent and self.event.has_subevents:
             raise TypeError('You need to supply a subevent.')
-        if ignored_quotas:
-            check_quotas -= set(ignored_quotas)
-        if not check_quotas:
-            return Quota.AVAILABILITY_OK, sys.maxsize
-        if self.has_variations:  # NOQA
-            raise ValueError('Do not call this directly on items which have variations '
-                             'but call this on their ItemVariation objects')
-        return min([q.availability(count_waitinglist=count_waitinglist, _cache=_cache) for q in check_quotas],
-                   key=lambda s: (s[0], s[1] if s[1] is not None else sys.maxsize))
+        check_quotas = self._get_quotas(ignored_quotas=ignored_quotas, subevent=subevent)
+        quotacounter = Counter()
+        res = Quota.AVAILABILITY_OK, None
+        for q in check_quotas:
+            quotacounter[q] += 1
+
+        if include_bundled:
+            for b in self.bundles.all():
+                bundled_check_quotas = (b.bundled_variation or b.bundled_item)._get_quotas(ignored_quotas=ignored_quotas, subevent=subevent)
+                if not bundled_check_quotas:
+                    return Quota.AVAILABILITY_GONE, 0
+                for q in bundled_check_quotas:
+                    quotacounter[q] += b.count
+
+        for q, n in quotacounter.items():
+            a = q.availability(count_waitinglist=count_waitinglist, _cache=_cache)
+            if a[1] is None:
+                continue
+
+            num_avail = a[1] // n
+            code_avail = Quota.AVAILABILITY_GONE if a[1] >= 1 and num_avail < 1 else a[0]
+            # this is not entirely accurate, as it shows "sold out" even if it is actually just "reserved",
+            # since we do not know that distinction here if at least one item is available. However, this
+            # is only relevant in connection with bundles.
+
+            if code_avail < res[0] or res[1] is None or num_avail < res[1]:
+                res = (code_avail, num_avail)
+
+        if len(quotacounter) == 0:
+            if fail_on_no_quotas:
+                return Quota.AVAILABILITY_GONE, 0
+            return Quota.AVAILABILITY_OK, sys.maxsize  # backwards compatibility
+        return res
 
     def allow_delete(self):
         from pretix.base.models.orders import OrderPosition
 
         return not OrderPosition.all.filter(item=self).exists()
+
+    @property
+    def includes_mixed_tax_rate(self):
+        for b in self.bundles.all():
+            if b.designated_price and b.bundled_item.tax_rule_id != self.tax_rule_id:
+                return True
+        return False
 
     @cached_property
     def has_variations(self):
@@ -490,6 +609,8 @@ class ItemVariation(models.Model):
     :type active: bool
     :param default_price: This variation's default price
     :type default_price: decimal.Decimal
+    :param original_price: The item's "original" price. Will not be used for any calculations, will just be shown.
+    :type original_price: decimal.Decimal
     """
     item = models.ForeignKey(
         Item,
@@ -518,6 +639,15 @@ class ItemVariation(models.Model):
         null=True, blank=True,
         verbose_name=_("Default price"),
     )
+    original_price = models.DecimalField(
+        verbose_name=_('Original price'),
+        blank=True, null=True,
+        max_digits=7, decimal_places=2,
+        help_text=_('If set, this will be displayed next to the current price to show that the current price is a '
+                    'discounted one. This is just a cosmetic setting and will not actually impact pricing.')
+    )
+
+    objects = ScopedManager(organizer='item__event__organizer')
 
     class Meta:
         verbose_name = _("Product variation")
@@ -531,13 +661,31 @@ class ItemVariation(models.Model):
     def price(self):
         return self.default_price if self.default_price is not None else self.item.default_price
 
-    def tax(self, price=None):
+    def tax(self, price=None, base_price_is='auto', currency=None, include_bundled=False):
         price = price if price is not None else self.price
+
         if not self.item.tax_rule:
-            return TaxedPrice(gross=price, net=price, tax=Decimal('0.00'), rate=Decimal('0.00'), name='')
-        return self.item.tax_rule.tax(price)
+            t = TaxedPrice(gross=price, net=price, tax=Decimal('0.00'),
+                           rate=Decimal('0.00'), name='')
+        else:
+            t = self.item.tax_rule.tax(price, base_price_is=base_price_is, currency=currency)
+
+        if include_bundled:
+            for b in self.item.bundles.all():
+                if b.designated_price and b.bundled_item.tax_rule_id != self.item.tax_rule_id:
+                    if b.bundled_variation:
+                        bprice = b.bundled_variation.tax(b.designated_price * b.count, base_price_is='gross', currency=currency)
+                    else:
+                        bprice = b.bundled_item.tax(b.designated_price * b.count, base_price_is='gross', currency=currency)
+                    compare_price = self.item.tax_rule.tax(b.designated_price * b.count, base_price_is='gross', currency=currency)
+                    t.net += bprice.net - compare_price.net
+                    t.tax += bprice.tax - compare_price.tax
+                    t.name = "MIXED!"
+
+        return t
 
     def delete(self, *args, **kwargs):
+        self.vouchers.update(item=None, variation=None, quota=None)
         super().delete(*args, **kwargs)
         if self.item:
             self.item.event.cache.clear()
@@ -547,7 +695,18 @@ class ItemVariation(models.Model):
         if self.item:
             self.item.event.cache.clear()
 
-    def check_quotas(self, ignored_quotas=None, count_waitinglist=True, subevent=None, _cache=None) -> Tuple[int, int]:
+    def _get_quotas(self, ignored_quotas=None, subevent=None):
+        check_quotas = set(getattr(
+            self, '_subevent_quotas',  # Utilize cache in product list
+            self.quotas.filter(subevent=subevent).select_related('subevent')
+            if subevent else self.quotas.all()
+        ))
+        if ignored_quotas:
+            check_quotas -= set(ignored_quotas)
+        return check_quotas
+
+    def check_quotas(self, ignored_quotas=None, count_waitinglist=True, subevent=None, _cache=None,
+                     include_bundled=False, trust_parameters=False, fail_on_no_quotas=False) -> Tuple[int, int]:
         """
         This method is used to determine whether this ItemVariation is currently
         available for sale in terms of quotas.
@@ -559,19 +718,40 @@ class ItemVariation(models.Model):
         :param count_waitinglist: If ``False``, waiting list entries will be ignored for quota calculation.
         :returns: any of the return codes of :py:meth:`Quota.availability()`.
         """
-        check_quotas = set(getattr(
-            self, '_subevent_quotas',  # Utilize cache in product list
-            self.quotas.filter(subevent=subevent).select_related('subevent')
-            if subevent else self.quotas.all()
-        ))
-        if ignored_quotas:
-            check_quotas -= set(ignored_quotas)
-        if not subevent and self.item.event.has_subevents:  # NOQA
+        if not trust_parameters and not subevent and self.item.event.has_subevents:  # NOQA
             raise TypeError('You need to supply a subevent.')
-        if not check_quotas:
-            return Quota.AVAILABILITY_OK, sys.maxsize
-        return min([q.availability(count_waitinglist=count_waitinglist, _cache=_cache) for q in check_quotas],
-                   key=lambda s: (s[0], s[1] if s[1] is not None else sys.maxsize))
+        check_quotas = self._get_quotas(ignored_quotas=ignored_quotas, subevent=subevent)
+        quotacounter = Counter()
+        res = Quota.AVAILABILITY_OK, None
+        for q in check_quotas:
+            quotacounter[q] += 1
+
+        if include_bundled:
+            for b in self.item.bundles.all():
+                bundled_check_quotas = (b.bundled_variation or b.bundled_item)._get_quotas(ignored_quotas=ignored_quotas, subevent=subevent)
+                if not bundled_check_quotas:
+                    return Quota.AVAILABILITY_GONE, 0
+                for q in bundled_check_quotas:
+                    quotacounter[q] += b.count
+
+        for q, n in quotacounter.items():
+            a = q.availability(count_waitinglist=count_waitinglist, _cache=_cache)
+            if a[1] is None:
+                continue
+
+            num_avail = a[1] // n
+            code_avail = Quota.AVAILABILITY_GONE if a[1] >= 1 and num_avail < 1 else a[0]
+            # this is not entirely accurate, as it shows "sold out" even if it is actually just "reserved",
+            # since we do not know that distinction here if at least one item is available. However, this
+            # is only relevant in connection with bundles.
+
+            if code_avail < res[0] or res[1] is None or num_avail < res[1]:
+                res = (code_avail, num_avail)
+        if len(quotacounter) == 0:
+            if fail_on_no_quotas:
+                return Quota.AVAILABILITY_GONE, 0
+            return Quota.AVAILABILITY_OK, sys.maxsize  # backwards compatibility
+        return res
 
     def __lt__(self, other):
         if self.position == other.position:
@@ -672,6 +852,83 @@ class ItemAddOn(models.Model):
             raise ValidationError(_('The maximum count needs to be greater than the minimum count.'))
 
 
+class ItemBundle(models.Model):
+    """
+    An instance of this model indicates that buying a ticket of the type ``base_item``
+    automatically also buys ``count`` items of type ``bundled_item``.
+
+    :param base_item: The base item the bundle is attached to
+    :type base_item: Item
+    :param bundled_item: The bundled item
+    :type bundled_item: Item
+    :param bundled_variation: The variation, if the bundled item has variations
+    :type bundled_variation: ItemVariation
+    :param count: The number of items to bundle
+    :type count: int
+    :param designated_price: The designated part price (optional)
+    :type designated_price: bool
+    """
+    base_item = models.ForeignKey(
+        Item,
+        related_name='bundles',
+        on_delete=models.CASCADE
+    )
+    bundled_item = models.ForeignKey(
+        Item,
+        related_name='bundled_with',
+        verbose_name=_('Bundled item'),
+        on_delete=models.CASCADE
+    )
+    bundled_variation = models.ForeignKey(
+        ItemVariation,
+        related_name='bundled_with',
+        verbose_name=_('Bundled variation'),
+        null=True, blank=True,
+        on_delete=models.CASCADE
+    )
+    count = models.PositiveIntegerField(
+        default=1,
+        verbose_name=_('Number')
+    )
+    designated_price = models.DecimalField(
+        default=Decimal('0.00'), blank=True,
+        decimal_places=2, max_digits=10,
+        verbose_name=_('Designated price part'),
+        help_text=_('If set, it will be shown that this bundled item is responsible for the given value of the total '
+                    'gross price. This might be important in cases of mixed taxation, but can be kept blank otherwise. This '
+                    'value will NOT be added to the base item\'s price.')
+    )
+
+    def clean(self):
+        self.clean_count(self.count)
+
+    def describe(self):
+        if self.count == 1:
+            if self.bundled_variation_id:
+                return "{} – {}".format(self.bundled_item.name, self.bundled_variation.value)
+            else:
+                return self.bundled_item.name
+        else:
+            if self.bundled_variation_id:
+                return "{}× {} – {}".format(self.count, self.bundled_item.name, self.bundled_variation.value)
+            else:
+                return "{}x {}".format(self.count, self.bundled_item.name)
+
+    @staticmethod
+    def clean_itemvar(event, bundled_item, bundled_variation):
+        if event != bundled_item.event:
+            raise ValidationError(_('The bundled item must belong to the same event as the item.'))
+        if bundled_item.has_variations and not bundled_variation:
+            raise ValidationError(_('A variation needs to be set for this item.'))
+        if bundled_variation and bundled_variation.item != bundled_item:
+            raise ValidationError(_('The chosen variation does not belong to this item.'))
+
+    @staticmethod
+    def clean_count(count):
+        if count < 0:
+            raise ValidationError(_('The count needs to be equal to or greater than zero.'))
+
+
 class Question(LoggedModel):
     """
     A question is an input field that can be used to extend a ticket by custom information,
@@ -700,12 +957,14 @@ class Question(LoggedModel):
     :param items: A set of ``Items`` objects that this question should be applied to
     :param ask_during_checkin: Whether to ask this question during check-in instead of during check-out.
     :type ask_during_checkin: bool
+    :param hidden: Whether to only show the question in the backend
+    :type hidden: bool
     :param identifier: An arbitrary, internal identifier
     :type identifier: str
     :param dependency_question: This question will only show up if the referenced question is set to `dependency_value`.
     :type dependency_question: Question
-    :param dependency_value: The value that `dependency_question` needs to be set to for this question to be applicable.
-    :type dependency_value: str
+    :param dependency_values: The values that `dependency_question` needs to be set to for this question to be applicable.
+    :type dependency_values: list[str]
     """
     TYPE_NUMBER = "N"
     TYPE_STRING = "S"
@@ -717,6 +976,7 @@ class Question(LoggedModel):
     TYPE_DATE = "D"
     TYPE_TIME = "H"
     TYPE_DATETIME = "W"
+    TYPE_COUNTRYCODE = "CC"
     TYPE_CHOICES = (
         (TYPE_NUMBER, _("Number")),
         (TYPE_STRING, _("Text (one line)")),
@@ -728,7 +988,9 @@ class Question(LoggedModel):
         (TYPE_DATE, _("Date")),
         (TYPE_TIME, _("Time")),
         (TYPE_DATETIME, _("Date and time")),
+        (TYPE_COUNTRYCODE, _("Country code (ISO 3166-1 alpha-2)")),
     )
+    UNLOCALIZED_TYPES = [TYPE_DATE, TYPE_TIME, TYPE_DATETIME]
 
     event = models.ForeignKey(
         Event,
@@ -771,14 +1033,23 @@ class Question(LoggedModel):
     )
     ask_during_checkin = models.BooleanField(
         verbose_name=_('Ask during check-in instead of in the ticket buying process'),
-        help_text=_('This will only work if you handle your check-in with pretixdroid 1.8 or newer or '
-                    'pretixdesk 0.2 or newer.'),
+        default=False
+    )
+    hidden = models.BooleanField(
+        verbose_name=_('Hidden question'),
+        help_text=_('This question will only show up in the backend.'),
+        default=False
+    )
+    print_on_invoice = models.BooleanField(
+        verbose_name=_('Print answer on invoices'),
         default=False
     )
     dependency_question = models.ForeignKey(
         'Question', null=True, blank=True, on_delete=models.SET_NULL, related_name='dependent_questions'
     )
-    dependency_value = models.TextField(null=True, blank=True)
+    dependency_values = MultiStringField(default=[])
+
+    objects = ScopedManager(organizer='event__organizer')
 
     class Meta:
         verbose_name = _("Question")
@@ -878,6 +1149,12 @@ class Question(LoggedModel):
                 return dt
             except:
                 raise ValidationError(_('Invalid datetime input.'))
+        elif self.type == Question.TYPE_COUNTRYCODE and answer:
+            c = Country(answer.upper())
+            if c.name:
+                return answer
+            else:
+                raise ValidationError(_('Unknown country code.'))
 
         return answer
 
@@ -1023,6 +1300,17 @@ class Quota(LoggedModel):
     cached_availability_paid_orders = models.PositiveIntegerField(null=True, blank=True)
     cached_availability_time = models.DateTimeField(null=True, blank=True)
 
+    close_when_sold_out = models.BooleanField(
+        verbose_name=_('Close this quota permanently once it is sold out'),
+        help_text=_('If you enable this, when the quota is sold out once, no more tickets will be sold, '
+                    'even if tickets become available again through cancellations or expiring orders. Of course, '
+                    'you can always re-open it manually.'),
+        default=False
+    )
+    closed = models.BooleanField(default=False)
+
+    objects = ScopedManager(organizer='event__organizer')
+
     class Meta:
         verbose_name = _("Quota")
         verbose_name_plural = _("Quotas")
@@ -1032,6 +1320,7 @@ class Quota(LoggedModel):
         return self.name
 
     def delete(self, *args, **kwargs):
+        self.vouchers.update(item=None, variation=None, quota=None)
         super().delete(*args, **kwargs)
         if self.event:
             self.event.cache.clear()
@@ -1081,6 +1370,14 @@ class Quota(LoggedModel):
             return _cache[self.pk]
         now_dt = now_dt or now()
         res = self._availability(now_dt, count_waitinglist)
+        for recv, resp in quota_availability.send(sender=self.event, quota=self, result=res,
+                                                  count_waitinglist=count_waitinglist):
+            res = resp
+
+        if res[0] <= Quota.AVAILABILITY_ORDERED and self.close_when_sold_out and not self.closed:
+            self.closed = True
+            self.save(update_fields=['closed'])
+            self.log_action('pretix.event.quota.closed')
 
         self.event.cache.delete('item_quota_cache')
         rewrite_cache = count_waitinglist and (
@@ -1097,7 +1394,8 @@ class Quota(LoggedModel):
                     'cached_availability_state', 'cached_availability_number', 'cached_availability_time',
                     'cached_availability_paid_orders'
                 ],
-                clear_cache=False
+                clear_cache=False,
+                using='default'
             )
 
         if _cache is not None:
@@ -1105,8 +1403,11 @@ class Quota(LoggedModel):
             _cache['_count_waitinglist'] = count_waitinglist
         return res
 
-    def _availability(self, now_dt: datetime=None, count_waitinglist=True):
+    def _availability(self, now_dt: datetime=None, count_waitinglist=True, ignore_closed=False):
         now_dt = now_dt or now()
+        if self.closed and not ignore_closed:
+            return Quota.AVAILABILITY_ORDERED, 0
+
         size_left = self.size
         if size_left is None:
             return Quota.AVAILABILITY_OK, None
@@ -1207,7 +1508,7 @@ class Quota(LoggedModel):
 
     @staticmethod
     def clean_variations(items, variations):
-        for variation in variations:
+        for variation in (variations or []):
             if variation.item not in items:
                 raise ValidationError(_('All variations must belong to an item contained in the items list.'))
                 break

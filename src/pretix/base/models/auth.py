@@ -1,5 +1,9 @@
+import binascii
+import json
 from datetime import timedelta
+from urllib.parse import urlparse
 
+import webauthn
 from django.conf import settings
 from django.contrib.auth.models import (
     AbstractBaseUser, BaseUserManager, PermissionsMixin,
@@ -12,6 +16,10 @@ from django.utils.crypto import get_random_string
 from django.utils.timezone import now
 from django.utils.translation import ugettext_lazy as _
 from django_otp.models import Device
+from django_scopes import scopes_disabled
+from u2flib_server.utils import (
+    pub_key_from_der, websafe_decode, websafe_encode,
+)
 
 from pretix.base.i18n import language
 from pretix.helpers.urls import build_absolute_uri
@@ -101,6 +109,7 @@ class User(AbstractBaseUser, PermissionsMixin, LoggingMixin):
         help_text=_('If turned off, you will not get any notifications.')
     )
     notifications_token = models.CharField(max_length=255, default=generate_notifications_token)
+    auth_backend = models.CharField(max_length=255, default='native')
 
     objects = UserManager()
 
@@ -111,6 +120,7 @@ class User(AbstractBaseUser, PermissionsMixin, LoggingMixin):
     class Meta:
         verbose_name = _("User")
         verbose_name_plural = _("Users")
+        ordering = ('email',)
 
     def save(self, *args, **kwargs):
         self.email = self.email.lower()
@@ -174,6 +184,7 @@ class User(AbstractBaseUser, PermissionsMixin, LoggingMixin):
                     'url': build_absolute_uri('control:user.settings')
                 },
                 event=None,
+                user=self,
                 locale=self.locale
             )
         except SendMailException:
@@ -189,8 +200,12 @@ class User(AbstractBaseUser, PermissionsMixin, LoggingMixin):
                 'url': (build_absolute_uri('control:auth.forgot.recover')
                         + '?id=%d&token=%s' % (self.id, default_token_generator.make_token(self)))
             },
-            None, locale=self.locale
+            None, locale=self.locale, user=self
         )
+
+    @property
+    def top_logentries(self):
+        return self.all_logentries
 
     @property
     def all_logentries(self):
@@ -282,6 +297,7 @@ class User(AbstractBaseUser, PermissionsMixin, LoggingMixin):
                 return True
         return False
 
+    @scopes_disabled()
     def get_events_with_any_permission(self, request=None):
         """
         Returns a queryset of events the user has any permissions to.
@@ -299,6 +315,7 @@ class User(AbstractBaseUser, PermissionsMixin, LoggingMixin):
             | Q(id__in=self.teams.values_list('limit_events__id', flat=True))
         )
 
+    @scopes_disabled()
     def get_events_with_permission(self, permission, request=None):
         """
         Returns a queryset of events the user has a specific permissions to.
@@ -316,6 +333,25 @@ class User(AbstractBaseUser, PermissionsMixin, LoggingMixin):
         return Event.objects.filter(
             Q(organizer_id__in=self.teams.filter(all_events=True, **kwargs).values_list('organizer', flat=True))
             | Q(id__in=self.teams.filter(**kwargs).values_list('limit_events__id', flat=True))
+        )
+
+    @scopes_disabled()
+    def get_organizers_with_permission(self, permission, request=None):
+        """
+        Returns a queryset of organizers the user has a specific permissions to.
+
+        :param request: The current request (optional). Required to detect staff sessions properly.
+        :return: Iterable of Organizers
+        """
+        from .event import Organizer
+
+        if request and self.has_active_staff_session(request.session.session_key):
+            return Organizer.objects.all()
+
+        kwargs = {permission: True}
+
+        return Organizer.objects.filter(
+            id__in=self.teams.filter(**kwargs).values_list('organizer', flat=True)
         )
 
     def has_active_staff_session(self, session_key=None):
@@ -371,3 +407,49 @@ class StaffSessionAuditLog(models.Model):
 
 class U2FDevice(Device):
     json_data = models.TextField()
+
+    @property
+    def webauthnuser(self):
+        d = json.loads(self.json_data)
+        # We manually need to convert the pubkey from DER format (used in our
+        # former U2F implementation) to the format required by webauthn. This
+        # is based on the following example:
+        # https://www.w3.org/TR/webauthn/#sctn-encoded-credPubKey-examples
+        pub_key = pub_key_from_der(websafe_decode(d['publicKey'].replace('+', '-').replace('/', '_')))
+        pub_key = binascii.unhexlify(
+            'A5010203262001215820{:064x}225820{:064x}'.format(
+                pub_key.public_numbers().x, pub_key.public_numbers().y
+            )
+        )
+        return webauthn.WebAuthnUser(
+            d['keyHandle'],
+            self.user.email,
+            str(self.user),
+            settings.SITE_URL,
+            d['keyHandle'],
+            websafe_encode(pub_key),
+            1,
+            urlparse(settings.SITE_URL).netloc
+        )
+
+
+class WebAuthnDevice(Device):
+    credential_id = models.CharField(max_length=255, null=True, blank=True)
+    rp_id = models.CharField(max_length=255, null=True, blank=True)
+    icon_url = models.CharField(max_length=255, null=True, blank=True)
+    ukey = models.TextField(null=True)
+    pub_key = models.TextField(null=True)
+    sign_count = models.IntegerField(default=0)
+
+    @property
+    def webauthnuser(self):
+        return webauthn.WebAuthnUser(
+            self.ukey,
+            self.user.email,
+            str(self.user),
+            settings.SITE_URL,
+            self.credential_id,
+            self.pub_key,
+            self.sign_count,
+            urlparse(settings.SITE_URL).netloc
+        )

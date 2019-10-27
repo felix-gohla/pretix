@@ -12,8 +12,10 @@ Contents:
    payment
    payment_2.0
    email
+   placeholder
    invoice
    shredder
    customview
+   auth
    general
    quality

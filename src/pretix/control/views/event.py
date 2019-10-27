@@ -1,7 +1,6 @@
 import json
 import re
 from collections import OrderedDict
-from datetime import timedelta
 from decimal import Decimal
 from urllib.parse import urlsplit
 
@@ -18,7 +17,6 @@ from django.http import (
 from django.shortcuts import get_object_or_404, redirect
 from django.urls import reverse
 from django.utils import translation
-from django.utils.formats import date_format
 from django.utils.functional import cached_property
 from django.utils.timezone import now
 from django.utils.translation import ugettext, ugettext_lazy as _
@@ -28,32 +26,30 @@ from django.views.generic.detail import SingleObjectMixin
 from i18nfield.strings import LazyI18nString
 from pytz import timezone
 
-from pretix.base.i18n import LazyCurrencyNumber
+from pretix.base.channels import get_all_sales_channels
+from pretix.base.email import get_available_placeholders
 from pretix.base.models import (
-    CachedCombinedTicket, CachedTicket, Event, LogEntry, Order, RequiredAction,
-    TaxRule, Voucher,
+    Event, LogEntry, Order, RequiredAction, TaxRule, Voucher,
 )
 from pretix.base.models.event import EventMetaValue
 from pretix.base.services import tickets
 from pretix.base.services.invoices import build_preview_invoice_pdf
 from pretix.base.signals import register_ticket_outputs
-from pretix.base.templatetags.money import money_filter
 from pretix.base.templatetags.rich_text import markdown_compile_email
 from pretix.control.forms.event import (
-    CancelSettingsForm, CommentForm, DisplaySettingsForm, EventDeleteForm,
-    EventMetaValueForm, EventSettingsForm, EventUpdateForm,
-    InvoiceSettingsForm, MailSettingsForm, PaymentSettingsForm, ProviderForm,
-    QuickSetupForm, QuickSetupProductFormSet, TaxRuleForm, TaxRuleLineFormSet,
+    CancelSettingsForm, CommentForm, EventDeleteForm, EventMetaValueForm,
+    EventSettingsForm, EventUpdateForm, InvoiceSettingsForm, MailSettingsForm,
+    PaymentSettingsForm, ProviderForm, QuickSetupForm,
+    QuickSetupProductFormSet, TaxRuleForm, TaxRuleLineFormSet,
     TicketSettingsForm, WidgetCodeForm,
 )
 from pretix.control.permissions import EventPermissionRequiredMixin
 from pretix.helpers.database import rolledback_transaction
-from pretix.helpers.urls import build_absolute_uri
 from pretix.multidomain.urlreverse import get_domain
 from pretix.plugins.stripe.payment import StripeSettingsHolder
 from pretix.presale.style import regenerate_css
 
-from ..logdisplay import OVERVIEW_BLACKLIST
+from ..logdisplay import OVERVIEW_BANLIST
 from . import CreateView, PaginationMixin, UpdateView
 
 
@@ -99,7 +95,21 @@ class MetaDataEditorMixin:
                 f.instance.delete()
 
 
-class EventUpdate(EventSettingsViewMixin, EventPermissionRequiredMixin, MetaDataEditorMixin, UpdateView):
+class DecoupleMixin:
+
+    def _save_decoupled(self, form):
+        # Save fields that are currently only set via the organizer but should be decoupled
+        fields = set()
+        for f in self.request.POST.getlist("decouple"):
+            fields |= set(f.split(","))
+        for f in fields:
+            if f not in form.fields:
+                continue
+            if f not in self.request.event.settings._cache():
+                self.request.event.settings.set(f, self.request.event.settings.get(f))
+
+
+class EventUpdate(DecoupleMixin, EventSettingsViewMixin, EventPermissionRequiredMixin, MetaDataEditorMixin, UpdateView):
     model = Event
     form_class = EventUpdateForm
     template_name = 'pretixcontrol/event/settings.html'
@@ -117,7 +127,8 @@ class EventUpdate(EventSettingsViewMixin, EventPermissionRequiredMixin, MetaData
         return EventSettingsForm(
             obj=self.object,
             prefix='settings',
-            data=self.request.POST if self.request.method == 'POST' else None
+            data=self.request.POST if self.request.method == 'POST' else None,
+            files=self.request.FILES if self.request.method == 'POST' else None,
         )
 
     def get_context_data(self, *args, **kwargs) -> dict:
@@ -128,18 +139,32 @@ class EventUpdate(EventSettingsViewMixin, EventPermissionRequiredMixin, MetaData
 
     @transaction.atomic
     def form_valid(self, form):
+        self._save_decoupled(self.sform)
         self.sform.save()
         self.save_meta()
+        change_css = False
 
         if self.sform.has_changed():
             self.request.event.log_action('pretix.event.settings', user=self.request.user, data={
                 k: self.request.event.settings.get(k) for k in self.sform.changed_data
             })
+            display_properties = (
+                'primary_color', 'theme_color_success', 'theme_color_danger', 'primary_font',
+            )
+            if any(p in self.sform.changed_data for p in display_properties):
+                change_css = True
         if form.has_changed():
             self.request.event.log_action('pretix.event.changed', user=self.request.user, data={
                 k: getattr(self.request.event, k) for k in form.changed_data
             })
-        messages.success(self.request, _('Your changes have been saved.'))
+
+        if change_css:
+            regenerate_css.apply_async(args=(self.request.event.pk,))
+            messages.success(self.request, _('Your changes have been saved. Please note that it can '
+                                             'take a short period of time until your changes become '
+                                             'active.'))
+        else:
+            messages.success(self.request, _('Your changes have been saved.'))
         return super().form_valid(form)
 
     def get_success_url(self) -> str:
@@ -312,7 +337,7 @@ class PaymentProviderSettings(EventSettingsViewMixin, EventPermissionRequiredMix
             return self.get(request)
 
 
-class EventSettingsFormView(EventPermissionRequiredMixin, FormView):
+class EventSettingsFormView(EventPermissionRequiredMixin, DecoupleMixin, FormView):
     model = Event
     permission = 'can_change_event_settings'
 
@@ -324,17 +349,6 @@ class EventSettingsFormView(EventPermissionRequiredMixin, FormView):
         kwargs = super().get_form_kwargs()
         kwargs['obj'] = self.request.event
         return kwargs
-
-    def _save_decoupled(self, form):
-        # Save fields that are currently only set via the organizer but should be decoupled
-        fields = set()
-        for f in self.request.POST.getlist("decouple"):
-            fields |= set(f.split(","))
-        for f in fields:
-            if f not in form.fields:
-                continue
-            if f not in self.request.event.settings._cache():
-                self.request.event.settings.set(f, self.request.event.settings.get(f))
 
     def form_success(self):
         pass
@@ -453,41 +467,12 @@ class InvoicePreview(EventPermissionRequiredMixin, View):
         return resp
 
 
-class DisplaySettings(EventSettingsViewMixin, EventSettingsFormView):
-    model = Event
-    form_class = DisplaySettingsForm
-    template_name = 'pretixcontrol/event/display.html'
-    permission = 'can_change_event_settings'
-
-    def get_success_url(self) -> str:
-        return reverse('control:event.settings.display', kwargs={
+class DisplaySettings(View):
+    def get(self, request, *wargs, **kwargs):
+        return redirect(reverse('control:event.settings', kwargs={
             'organizer': self.request.event.organizer.slug,
             'event': self.request.event.slug
-        })
-
-    @transaction.atomic
-    def post(self, request, *args, **kwargs):
-        form = self.get_form()
-        if form.is_valid():
-            form.save()
-            self._save_decoupled(form)
-            if form.has_changed():
-                self.request.event.log_action(
-                    'pretix.event.settings', user=self.request.user, data={
-                        k: (form.cleaned_data.get(k).name
-                            if isinstance(form.cleaned_data.get(k), File)
-                            else form.cleaned_data.get(k))
-                        for k in form.changed_data
-                    }
-                )
-            regenerate_css.apply_async(args=(self.request.event.pk,))
-            messages.success(self.request, _('Your changes have been saved. Please note that it can '
-                                             'take a short period of time until your changes become '
-                                             'active.'))
-            return redirect(self.get_success_url())
-        else:
-            messages.error(self.request, _('We could not save your changes. See below for details.'))
-            return self.get(request)
+        }) + '#tab-0-3-open')
 
 
 class MailSettings(EventSettingsViewMixin, EventSettingsFormView):
@@ -549,20 +534,6 @@ class MailSettingsPreview(EventPermissionRequiredMixin, View):
         def __missing__(self, key):
             return '{' + key + '}'
 
-    @staticmethod
-    def generate_order_fullname(slug, code):
-        return '{event}-{code}'.format(event=slug.upper(), code=code)
-
-    # create data which depend on locale
-    def localized_data(self):
-        return {
-            'date': date_format(now() + timedelta(days=7), 'SHORT_DATE_FORMAT'),
-            'expire_date': date_format(now() + timedelta(days=15), 'SHORT_DATE_FORMAT'),
-            'payment_info': _('{} has been transferred to account <9999-9999-9999-9999> at {}').format(
-                money_filter(Decimal('42.23'), self.request.event.currency),
-                date_format(now(), 'SHORT_DATETIME_FORMAT'))
-        }
-
     # create index-language mapping
     @cached_property
     def supported_locale(self):
@@ -572,86 +543,23 @@ class MailSettingsPreview(EventPermissionRequiredMixin, View):
                 locales[str(idx)] = val[0]
         return locales
 
-    @cached_property
-    def meta_properties(self):
-        return [p.name for p in self.request.organizer.meta_properties.all()]
-
-    @cached_property
-    def items(self):
-        kv = {
-            'mail_text_order_placed': ['total', 'currency', 'date', 'invoice_company', 'total_with_currency',
-                                       'event', 'payment_info', 'url', 'invoice_name'],
-            'mail_text_order_paid': ['event', 'url', 'invoice_name', 'invoice_company', 'payment_info'],
-            'mail_text_order_free': ['event', 'url', 'invoice_name', 'invoice_company'],
-            'mail_text_resend_link': ['event', 'url', 'invoice_name', 'invoice_company'],
-            'mail_text_resend_all_links': ['event', 'orders'],
-            'mail_text_order_changed': ['event', 'url', 'invoice_name', 'invoice_company'],
-            'mail_text_order_expire_warning': ['event', 'url', 'expire_date', 'invoice_name', 'invoice_company'],
-            'mail_text_waiting_list': ['event', 'url', 'product', 'hours', 'code'],
-            'mail_text_order_canceled': ['code', 'event', 'url'],
-            'mail_text_order_custom_mail': ['expire_date', 'event', 'code', 'date', 'url',
-                                            'invoice_name', 'invoice_company'],
-            'mail_text_download_reminder': ['event', 'url'],
-            'mail_text_order_placed_require_approval': ['total', 'currency', 'date', 'invoice_company',
-                                                        'total_with_currency', 'event', 'url', 'invoice_name'],
-            'mail_text_order_approved': ['total', 'currency', 'date', 'invoice_company',
-                                         'total_with_currency', 'event', 'url', 'invoice_name'],
-            'mail_text_order_denied': ['total', 'currency', 'date', 'invoice_company',
-                                       'total_with_currency', 'event', 'url', 'invoice_name'],
-        }
-        for v in kv.values():
-            for p in self.meta_properties:
-                v.append('meta_' + p)
-        return kv
-
-    @cached_property
-    def base_data(self):
-        user_orders = [
-            {'code': 'F8VVL', 'secret': '6zzjnumtsx136ddy'},
-            {'code': 'HIDHK', 'secret': '98kusd8ofsj8dnkd'},
-            {'code': 'OPKSB', 'secret': '09pjdksflosk3njd'}
-        ]
-        orders = [' - {} - {}'.format(self.generate_order_fullname(self.request.event.slug, order['code']),
-                                      self.generate_order_url(order['code'], order['secret']))
-                  for order in user_orders]
-        d = {
-            'event': self.request.event.name,
-            'total': 42.23,
-            'total_with_currency': LazyCurrencyNumber(42.23, self.request.event.currency),
-            'currency': self.request.event.currency,
-            'url': self.generate_order_url(user_orders[0]['code'], user_orders[0]['secret']),
-            'orders': '\n'.join(orders),
-            'hours': self.request.event.settings.waiting_list_hours,
-            'product': _('Sample Admission Ticket'),
-            'code': '68CYU2H6ZTP3WLK5',
-            'invoice_name': _('John Doe'),
-            'invoice_company': _('Sample Corporation'),
-            'common': _('An individial text with a reason can be inserted here.'),
-            'payment_info': _('Please transfer money to this bank account: 9999-9999-9999-9999'),
-        }
-        for k, v in self.request.event.meta_data.items():
-            d['meta_' + k] = v
-        return d
-
-    def generate_order_url(self, code, secret):
-        return build_absolute_uri('presale:event.order', kwargs={
-            'event': self.request.event.slug,
-            'organizer': self.request.event.organizer.slug,
-            'order': code,
-            'secret': secret
-        })
-
     # get all supported placeholders with dummy values
     def placeholders(self, item):
-        supported = {}
-        local_data = self.localized_data()
-        for key in self.items.get(item):
-            supported[key] = self.base_data.get(key) if key in self.base_data else local_data.get(key)
-        return self.SafeDict(supported)
+        ctx = {}
+        for p in get_available_placeholders(self.request.event, MailSettingsForm.base_context[item]).values():
+            s = str(p.render_sample(self.request.event))
+            if s.strip().startswith('*'):
+                ctx[p.identifier] = s
+            else:
+                ctx[p.identifier] = '<span class="placeholder" title="{}">{}</span>'.format(
+                    _('This value will be replaced based on dynamic parameters.'),
+                    s
+                )
+        return self.SafeDict(ctx)
 
     def post(self, request, *args, **kwargs):
         preview_item = request.POST.get('item', '')
-        if preview_item not in self.items:
+        if preview_item not in MailSettingsForm.base_context:
             return HttpResponseBadRequest(_('invalid item'))
 
         regex = r"^" + re.escape(preview_item) + r"_(?P<idx>[\d+])$"
@@ -689,13 +597,14 @@ class MailSettingsRendererPreview(MailSettingsPreview):
                                                     expires=now(), code="PREVIEW", total=119)
                 item = request.event.items.create(name=ugettext("Sample product"), default_price=42.23,
                                                   description=ugettext("Sample product description"))
-                order.positions.create(item=item, attendee_name_parts={'_legacy': ugettext("John Doe")},
-                                       price=item.default_price)
+                p = order.positions.create(item=item, attendee_name_parts={'_legacy': ugettext("John Doe")},
+                                           price=item.default_price)
                 v = renderers[request.GET.get('renderer')].render(
                     v,
                     str(request.event.settings.mail_text_signature),
                     ugettext('Your order: %(code)s') % {'code': order.code},
-                    order
+                    order,
+                    position=p
                 )
                 r = HttpResponse(v, content_type='text/html')
                 r._csp_ignore = True
@@ -788,12 +697,7 @@ class TicketSettings(EventSettingsViewMixin, EventPermissionRequiredMixin, FormV
                             for k in provider.form.changed_data
                         }
                     )
-                    CachedTicket.objects.filter(
-                        order_position__order__event=self.request.event, provider=provider.identifier
-                    ).delete()
-                    CachedCombinedTicket.objects.filter(
-                        order__event=self.request.event, provider=provider.identifier
-                    ).delete()
+                    tickets.invalidate_cache.apply_async(kwargs={'event': self.request.event.pk, 'provider': provider.identifier})
             else:
                 success = False
         form = self.get_form(self.get_form_class())
@@ -832,11 +736,14 @@ class TicketSettings(EventSettingsViewMixin, EventPermissionRequiredMixin, FormV
             provider.settings_content = provider.settings_content_render(self.request)
             provider.form.prepare_fields()
 
-            provider.preview_allowed = True
-            for k, v in provider.settings_form_fields.items():
-                if v.required and not self.request.event.settings.get('ticketoutput_%s_%s' % (provider.identifier, k)):
-                    provider.preview_allowed = False
-                    break
+            provider.evaluated_preview_allowed = True
+            if not provider.preview_allowed:
+                provider.evaluated_preview_allowed = False
+            else:
+                for k, v in provider.settings_form_fields.items():
+                    if v.required and not self.request.event.settings.get('ticketoutput_%s_%s' % (provider.identifier, k)):
+                        provider.evaluated_preview_allowed = False
+                        break
 
             providers.append(provider)
         return providers
@@ -901,6 +808,8 @@ class EventLive(EventPermissionRequiredMixin, TemplateView):
                                                    'created by plug-ins) do not allow it.'))
                 else:
                     request.event.cache.set('complain_testmode_orders', False, 30)
+            request.event.cartposition_set.filter(addon_to__isnull=False).delete()
+            request.event.cartposition_set.all().delete()
             messages.success(self.request, _('We\'ve disabled test mode for you. Let\'s sell some real tickets!'))
         return redirect(self.get_success_url())
 
@@ -962,7 +871,7 @@ class EventLog(EventPermissionRequiredMixin, ListView):
         qs = self.request.event.logentry_set.all().select_related(
             'user', 'content_type', 'api_token', 'oauth_application', 'device'
         ).order_by('-datetime')
-        qs = qs.exclude(action_type__in=OVERVIEW_BLACKLIST)
+        qs = qs.exclude(action_type__in=OVERVIEW_BANLIST)
         if not self.request.user.has_event_permission(self.request.organizer, self.request.event, 'can_view_orders',
                                                       request=self.request):
             qs = qs.exclude(content_type=ContentType.objects.get_for_model(Order))
@@ -976,6 +885,12 @@ class EventLog(EventPermissionRequiredMixin, ListView):
             qs = qs.filter(user__isnull=True)
         elif self.request.GET.get('user'):
             qs = qs.filter(user_id=self.request.GET.get('user'))
+
+        if self.request.GET.get('content_type'):
+            qs = qs.filter(content_type=get_object_or_404(ContentType, pk=self.request.GET.get('content_type')))
+
+            if self.request.GET.get('object'):
+                qs = qs.filter(object_id=self.request.GET.get('object'))
 
         return qs
 
@@ -1349,6 +1264,7 @@ class QuickSetupView(FormView):
                 tax_rule=tax_rule,
                 admission=True,
                 position=i,
+                sales_channels=[k for k in get_all_sales_channels().keys()]
             )
             item.log_action('pretix.event.item.added', user=self.request.user, data=dict(f.cleaned_data))
             if f.cleaned_data['quota'] or not form.cleaned_data['total_quota']:

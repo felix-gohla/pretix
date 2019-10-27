@@ -29,13 +29,16 @@ class SubEventForm(I18nModelForm):
         fields = [
             'name',
             'active',
+            'is_public',
             'date_from',
             'date_to',
             'date_admission',
             'presale_start',
             'presale_end',
             'location',
-            'frontpage_text'
+            'frontpage_text',
+            'geo_lat',
+            'geo_lon',
         ]
         field_classes = {
             'date_from': SplitDateTimeField,

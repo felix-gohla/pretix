@@ -56,6 +56,11 @@ class UserSettingsForm(forms.ModelForm):
         self.user = kwargs.pop('user')
         super().__init__(*args, **kwargs)
         self.fields['email'].required = True
+        if self.user.auth_backend != 'native':
+            del self.fields['old_pw']
+            del self.fields['new_pw']
+            del self.fields['new_pw_repeat']
+            self.fields['email'].disabled = True
 
     def clean_old_pw(self):
         old_pw = self.cleaned_data.get('old_pw')
@@ -115,5 +120,5 @@ class User2FADeviceAddForm(forms.Form):
     name = forms.CharField(label=_('Device name'), max_length=64)
     devicetype = forms.ChoiceField(label=_('Device type'), widget=forms.RadioSelect, choices=(
         ('totp', _('Smartphone with the Authenticator application')),
-        ('u2f', _('U2F-compatible hardware token (e.g. Yubikey)')),
+        ('webauthn', _('WebAuthn-compatible hardware token (e.g. Yubikey)')),
     ))

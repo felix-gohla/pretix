@@ -1,9 +1,10 @@
 import json
 from collections import OrderedDict
+from decimal import Decimal
 
 from django import forms
 from django.core.files.uploadedfile import UploadedFile
-from django.db.models import Prefetch
+from django.db.models import Prefetch, QuerySet
 from django.utils.functional import cached_property
 
 from pretix.base.forms.questions import (
@@ -88,19 +89,20 @@ class BaseQuestionsViewMixin:
                     elif k == 'attendee_email':
                         form.pos.attendee_email = v if v != '' else None
                         form.pos.save()
-                    elif k.startswith('question_') and v is not None:
+                    elif k.startswith('question_'):
                         field = form.fields[k]
                         if hasattr(field, 'answer'):
                             # We already have a cached answer object, so we don't
                             # have to create a new one
-                            if v == '' or v is None or (isinstance(field, forms.FileField) and v is False):
+                            if v == '' or v is None or (isinstance(field, forms.FileField) and v is False) \
+                                    or (isinstance(v, QuerySet) and not v.exists()):
                                 if field.answer.file:
                                     field.answer.file.delete()
                                 field.answer.delete()
                             else:
                                 self._save_to_answer(field, field.answer, v)
                                 field.answer.save()
-                        elif v != '':
+                        elif v != '' and v is not None:
                             answer = QuestionAnswer(
                                 cartposition=(form.pos if isinstance(form.pos, CartPosition) else None),
                                 orderposition=(form.pos if isinstance(form.pos, OrderPosition) else None),
@@ -158,7 +160,7 @@ class OrderQuestionsViewMixin(BaseQuestionsViewMixin):
     def positions(self):
         qqs = self.request.event.questions.all()
         if self.only_user_visible:
-            qqs = qqs.filter(ask_during_checkin=False)
+            qqs = qqs.filter(ask_during_checkin=False, hidden=False)
         return list(self.order.positions.select_related(
             'item', 'variation'
         ).prefetch_related(
@@ -187,24 +189,34 @@ class OrderQuestionsViewMixin(BaseQuestionsViewMixin):
             return InvoiceAddress(order=self.order)
 
     @cached_property
+    def address_asked(self):
+        return self.request.event.settings.invoice_address_asked and (
+            self.order.total != Decimal('0.00') or not self.request.event.settings.invoice_address_not_asked_free
+        )
+
+    @cached_property
     def invoice_form(self):
-        if not self.request.event.settings.invoice_address_asked and self.request.event.settings.invoice_name_required:
+        if not self.address_asked and self.request.event.settings.invoice_name_required:
             return self.invoice_name_form_class(
                 data=self.request.POST if self.request.method == "POST" else None,
                 event=self.request.event,
                 instance=self.invoice_address, validate_vat_id=False,
                 all_optional=self.all_optional
             )
-        return self.invoice_form_class(
-            data=self.request.POST if self.request.method == "POST" else None,
-            event=self.request.event,
-            instance=self.invoice_address, validate_vat_id=False,
-            all_optional=self.all_optional,
-        )
+        if self.address_asked:
+            return self.invoice_form_class(
+                data=self.request.POST if self.request.method == "POST" else None,
+                event=self.request.event,
+                instance=self.invoice_address, validate_vat_id=False,
+                all_optional=self.all_optional,
+            )
+        else:
+            return forms.Form(data=self.request.POST if self.request.method == "POST" else None)
 
     def get_context_data(self, **kwargs):
         ctx = super().get_context_data(**kwargs)
         ctx['order'] = self.order
         ctx['formgroups'] = self.formdict.items()
         ctx['invoice_form'] = self.invoice_form
+        ctx['invoice_address_asked'] = self.address_asked
         return ctx

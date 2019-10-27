@@ -7,7 +7,7 @@ from importlib import import_module
 import pytz
 from django.conf import settings
 from django.core.exceptions import PermissionDenied
-from django.db.models import Count, Prefetch
+from django.db.models import Count, Exists, OuterRef, Prefetch
 from django.http import Http404, HttpResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils.decorators import method_decorator
@@ -17,12 +17,14 @@ from django.views import View
 from django.views.decorators.csrf import csrf_exempt
 from django.views.generic import TemplateView
 
-from pretix.base.models import ItemVariation, Quota
+from pretix.base.models import ItemVariation, Quota, SeatCategoryMapping
 from pretix.base.models.event import SubEvent
+from pretix.base.models.items import ItemBundle
 from pretix.multidomain.urlreverse import eventreverse
 from pretix.presale.ical import get_ical
 from pretix.presale.views.organizer import (
-    add_subevents_for_days, weeks_for_template,
+    EventListMixin, add_subevents_for_days, filter_qs_by_attr,
+    weeks_for_template,
 )
 
 from . import (
@@ -47,25 +49,53 @@ def item_group_by_category(items):
     )
 
 
-def get_grouped_items(event, subevent=None, voucher=None, channel='web'):
-    items = event.items.filter_available(channel=channel, voucher=voucher).select_related(
+def get_grouped_items(event, subevent=None, voucher=None, channel='web', require_seat=0):
+    items = event.items.using(settings.DATABASE_REPLICA).filter_available(channel=channel, voucher=voucher).select_related(
         'category', 'tax_rule',  # for re-grouping
+        'hidden_if_available',
     ).prefetch_related(
         Prefetch('quotas',
                  to_attr='_subevent_quotas',
-                 queryset=event.quotas.filter(subevent=subevent)),
+                 queryset=event.quotas.using(settings.DATABASE_REPLICA).filter(subevent=subevent)),
+        Prefetch('bundles',
+                 queryset=ItemBundle.objects.using(settings.DATABASE_REPLICA).prefetch_related(
+                     Prefetch('bundled_item',
+                              queryset=event.items.using(settings.DATABASE_REPLICA).select_related('tax_rule').prefetch_related(
+                                  Prefetch('quotas',
+                                           to_attr='_subevent_quotas',
+                                           queryset=event.quotas.using(settings.DATABASE_REPLICA).filter(subevent=subevent)),
+                              )),
+                     Prefetch('bundled_variation',
+                              queryset=ItemVariation.objects.using(
+                                  settings.DATABASE_REPLICA
+                              ).select_related('item', 'item__tax_rule').filter(item__event=event).prefetch_related(
+                                  Prefetch('quotas',
+                                           to_attr='_subevent_quotas',
+                                           queryset=event.quotas.using(settings.DATABASE_REPLICA).filter(subevent=subevent)),
+                              )),
+                 )),
         Prefetch('variations', to_attr='available_variations',
-                 queryset=ItemVariation.objects.filter(active=True, quotas__isnull=False).prefetch_related(
+                 queryset=ItemVariation.objects.using(settings.DATABASE_REPLICA).filter(active=True, quotas__isnull=False).prefetch_related(
                      Prefetch('quotas',
                               to_attr='_subevent_quotas',
-                              queryset=event.quotas.filter(subevent=subevent))
+                              queryset=event.quotas.using(settings.DATABASE_REPLICA).filter(subevent=subevent))
                  ).distinct()),
     ).annotate(
         quotac=Count('quotas'),
-        has_variations=Count('variations')
+        has_variations=Count('variations'),
+        requires_seat=Exists(
+            SeatCategoryMapping.objects.filter(
+                product_id=OuterRef('pk'),
+                subevent=subevent
+            )
+        )
     ).filter(
-        quotac__gt=0
+        quotac__gt=0,
     ).order_by('category__position', 'category_id', 'position', 'name')
+    if require_seat:
+        items = items.filter(requires_seat__gt=0)
+    else:
+        items = items.filter(requires_seat=0)
     display_add_to_cart = False
     external_quota_cache = event.cache.get('item_quota_cache')
     quota_cache = external_quota_cache or {}
@@ -77,6 +107,11 @@ def get_grouped_items(event, subevent=None, voucher=None, channel='web'):
         item_price_override = {}
         var_price_override = {}
 
+    restrict_vars = set()
+    if voucher and voucher.quota_id:
+        # If a voucher is set to a specific quota, we need to filter out on that level
+        restrict_vars = set(voucher.quota.variations.all())
+
     for item in items:
         if voucher and voucher.item_id and voucher.variation_id:
             # Restrict variations if the voucher only allows one
@@ -85,8 +120,17 @@ def get_grouped_items(event, subevent=None, voucher=None, channel='web'):
 
         max_per_order = item.max_per_order or int(event.settings.max_items_per_order)
 
+        if item.hidden_if_available:
+            q = item.hidden_if_available.availability(_cache=quota_cache)
+            if q[0] == Quota.AVAILABILITY_OK:
+                item._remove = True
+                continue
+
         if not item.has_variations:
-            item._remove = not bool(item._subevent_quotas)
+            item._remove = False
+            if not bool(item._subevent_quotas):
+                item._remove = True
+                continue
 
             if voucher and (voucher.allow_ignore_quota or voucher.block_quota):
                 item.cached_availability = (
@@ -94,8 +138,12 @@ def get_grouped_items(event, subevent=None, voucher=None, channel='web'):
                 )
             else:
                 item.cached_availability = list(
-                    item.check_quotas(subevent=subevent, _cache=quota_cache)
+                    item.check_quotas(subevent=subevent, _cache=quota_cache, include_bundled=True)
                 )
+
+            if event.settings.hide_sold_out and item.cached_availability[0] < Quota.AVAILABILITY_RESERVED:
+                item._remove = True
+                continue
 
             item.order_max = min(
                 item.cached_availability[1]
@@ -103,10 +151,22 @@ def get_grouped_items(event, subevent=None, voucher=None, channel='web'):
                 max_per_order
             )
 
-            price = item_price_override.get(item.pk, item.default_price)
+            original_price = item_price_override.get(item.pk, item.default_price)
             if voucher:
-                price = voucher.calculate_price(price)
-            item.display_price = item.tax(price)
+                price = voucher.calculate_price(original_price)
+            else:
+                price = original_price
+
+            item.display_price = item.tax(price, currency=event.currency, include_bundled=True)
+
+            if price != original_price:
+                item.original_price = item.tax(original_price, currency=event.currency, include_bundled=True)
+            else:
+                item.original_price = (
+                    item.tax(item.original_price, currency=event.currency, include_bundled=True,
+                             base_price_is='net' if event.settings.display_net_prices else 'gross')  # backwards-compat
+                    if item.original_price else None
+                )
 
             display_add_to_cart = display_add_to_cart or item.order_max > 0
         else:
@@ -117,7 +177,7 @@ def get_grouped_items(event, subevent=None, voucher=None, channel='web'):
                     )
                 else:
                     var.cached_availability = list(
-                        var.check_quotas(subevent=subevent, _cache=quota_cache)
+                        var.check_quotas(subevent=subevent, _cache=quota_cache, include_bundled=True)
                     )
 
                 var.order_max = min(
@@ -126,16 +186,41 @@ def get_grouped_items(event, subevent=None, voucher=None, channel='web'):
                     max_per_order
                 )
 
-                price = var_price_override.get(var.pk, var.price)
+                original_price = var_price_override.get(var.pk, var.price)
                 if voucher:
-                    price = voucher.calculate_price(price)
-                var.display_price = var.tax(price)
+                    price = voucher.calculate_price(original_price)
+                else:
+                    price = original_price
+
+                var.display_price = var.tax(price, currency=event.currency, include_bundled=True)
+
+                if price != original_price:
+                    var.original_price = var.tax(original_price, currency=event.currency, include_bundled=True)
+                else:
+                    var.original_price = (
+                        var.tax(var.original_price or item.original_price, currency=event.currency,
+                                include_bundled=True,
+                                base_price_is='net' if event.settings.display_net_prices else 'gross')  # backwards-compat
+                    ) if var.original_price or item.original_price else None
 
                 display_add_to_cart = display_add_to_cart or var.order_max > 0
 
+            item.original_price = (
+                item.tax(item.original_price, currency=event.currency, include_bundled=True,
+                         base_price_is='net' if event.settings.display_net_prices else 'gross')  # backwards-compat
+                if item.original_price else None
+            )
+
             item.available_variations = [
-                v for v in item.available_variations if v._subevent_quotas
+                v for v in item.available_variations if v._subevent_quotas and (
+                    not voucher or not voucher.quota_id or v in restrict_vars
+                )
             ]
+
+            if event.settings.hide_sold_out:
+                item.available_variations = [v for v in item.available_variations
+                                             if v.cached_availability[0] >= Quota.AVAILABILITY_RESERVED]
+
             if voucher and voucher.variation_id:
                 item.available_variations = [v for v in item.available_variations
                                              if v.pk == voucher.variation_id]
@@ -157,7 +242,7 @@ def get_grouped_items(event, subevent=None, voucher=None, channel='web'):
 
 @method_decorator(allow_frame_if_namespaced, 'dispatch')
 @method_decorator(iframe_entry_view_wrapper, 'dispatch')
-class EventIndex(EventViewMixin, CartMixin, TemplateView):
+class EventIndex(EventViewMixin, EventListMixin, CartMixin, TemplateView):
     template_name = "pretixpresale/event/index.html"
 
     def get(self, request, *args, **kwargs):
@@ -192,7 +277,7 @@ class EventIndex(EventViewMixin, CartMixin, TemplateView):
 
         if request.event.has_subevents:
             if 'subevent' in kwargs:
-                self.subevent = request.event.subevents.filter(pk=kwargs['subevent'], active=True).first()
+                self.subevent = request.event.subevents.using(settings.DATABASE_REPLICA).filter(pk=kwargs['subevent'], active=True).first()
                 if not self.subevent:
                     raise Http404()
                 return super().get(request, *args, **kwargs)
@@ -204,38 +289,12 @@ class EventIndex(EventViewMixin, CartMixin, TemplateView):
             else:
                 return super().get(request, *args, **kwargs)
 
-    def _set_month_year(self):
-        tz = pytz.timezone(self.request.event.settings.timezone)
-        if self.subevent:
-            self.year = self.subevent.date_from.astimezone(tz).year
-            self.month = self.subevent.date_from.astimezone(tz).month
-        elif 'year' in self.request.GET and 'month' in self.request.GET:
-            try:
-                self.year = int(self.request.GET.get('year'))
-                self.month = int(self.request.GET.get('month'))
-            except ValueError:
-                self.year = now().year
-                self.month = now().month
-        else:
-            next_sev = self.request.event.subevents.filter(
-                active=True,
-                date_from__gte=now()
-            ).select_related('event').order_by('date_from').first()
-
-            if next_sev:
-                datetime_from = next_sev.date_from
-                self.year = datetime_from.astimezone(tz).year
-                self.month = datetime_from.astimezone(tz).month
-            else:
-                self.year = now().year
-                self.month = now().month
-
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)
         if not self.request.event.has_subevents or self.subevent:
             # Fetch all items
             items, display_add_to_cart = get_grouped_items(self.request.event, self.subevent,
-                                                           channel=self.request.sales_channel)
+                                                           channel=self.request.sales_channel.identifier)
             context['itemnum'] = len(items)
 
             # Regroup those by category
@@ -276,7 +335,7 @@ class EventIndex(EventViewMixin, CartMixin, TemplateView):
 
             ebd = defaultdict(list)
             add_subevents_for_days(
-                self.request.event.subevents_annotated(self.request.sales_channel),
+                filter_qs_by_attr(self.request.event.subevents_annotated(self.request.sales_channel.identifier).using(settings.DATABASE_REPLICA), self.request),
                 before, after, ebd, set(), self.request.event,
                 kwargs.get('cart_namespace')
             )
@@ -286,7 +345,7 @@ class EventIndex(EventViewMixin, CartMixin, TemplateView):
             context['years'] = range(now().year - 2, now().year + 3)
         else:
             context['subevent_list'] = self.request.event.subevents_sorted(
-                self.request.event.subevents_annotated(self.request.sales_channel)
+                filter_qs_by_attr(self.request.event.subevents_annotated(self.request.sales_channel.identifier).using(settings.DATABASE_REPLICA), self.request)
             )
 
         context['show_cart'] = (
@@ -300,7 +359,61 @@ class EventIndex(EventViewMixin, CartMixin, TemplateView):
                 or not self.subevent
             )
         )
+        if self.request.event.settings.redirect_to_checkout_directly:
+            context['cart_redirect'] = eventreverse(self.request.event, 'presale:event.checkout.start',
+                                                    kwargs={'cart_namespace': kwargs.get('cart_namespace') or ''})
+            if context['cart_redirect'].startswith('https:'):
+                context['cart_redirect'] = '/' + context['cart_redirect'].split('/', 3)[3]
+        else:
+            context['cart_redirect'] = self.request.path
 
+        return context
+
+
+@method_decorator(allow_frame_if_namespaced, 'dispatch')
+@method_decorator(iframe_entry_view_wrapper, 'dispatch')
+class SeatingPlanView(EventViewMixin, TemplateView):
+    template_name = "pretixpresale/event/seatingplan.html"
+
+    def get(self, request, *args, **kwargs):
+        from pretix.presale.views.cart import get_or_create_cart_id
+
+        self.subevent = None
+        if request.GET.get('src', '') == 'widget' and 'take_cart_id' in request.GET:
+            # User has clicked "Open in a new tab" link in widget
+            get_or_create_cart_id(request)
+            return redirect(eventreverse(request.event, 'presale:event.seatingplan', kwargs=kwargs))
+        elif request.GET.get('iframe', '') == '1' and 'take_cart_id' in request.GET:
+            # Widget just opened, a cart already exists. Let's to a stupid redirect to check if cookies are disabled
+            get_or_create_cart_id(request)
+            return redirect(eventreverse(request.event, 'presale:event.seatingplan', kwargs=kwargs) + '?require_cookie=true&cart_id={}'.format(
+                request.GET.get('take_cart_id')
+            ))
+        elif request.GET.get('iframe', '') == '1' and len(self.request.GET.get('widget_data', '{}')) > 3:
+            # We've been passed data from a widget, we need to create a cart session to store it.
+            get_or_create_cart_id(request)
+
+        if request.event.has_subevents:
+            if 'subevent' in kwargs:
+                self.subevent = request.event.subevents.using(settings.DATABASE_REPLICA).filter(pk=kwargs['subevent'], active=True).first()
+                if not self.subevent or not self.subevent.seating_plan:
+                    raise Http404()
+                return super().get(request, *args, **kwargs)
+            else:
+                raise Http404()
+        else:
+            if 'subevent' in kwargs or not request.event.seating_plan:
+                raise Http404()
+            else:
+                return super().get(request, *args, **kwargs)
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        context['subevent'] = self.subevent
+        context['cart_redirect'] = eventreverse(self.request.event, 'presale:event.checkout.start',
+                                                kwargs={'cart_namespace': kwargs.get('cart_namespace') or ''})
+        if context['cart_redirect'].startswith('https:'):
+            context['cart_redirect'] = '/' + context['cart_redirect'].split('/', 3)[3]
         return context
 
 

@@ -48,12 +48,18 @@ class UserEditForm(forms.ModelForm):
             'email',
             'require_2fa',
             'is_active',
-            'is_staff'
+            'is_staff',
+            'last_login'
         ]
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.fields['email'].required = True
+        self.fields['last_login'].disabled = True
+        if self.instance and self.instance.auth_backend != 'native':
+            del self.fields['new_pw']
+            del self.fields['new_pw_repeat']
+            self.fields['email'].disabled = True
 
     def clean_email(self):
         email = self.cleaned_data['email']

@@ -1,3 +1,4 @@
+import inspect
 from decimal import Decimal
 
 from django.conf import settings
@@ -12,9 +13,10 @@ from django.utils.translation import (
     get_language, pgettext_lazy, ugettext_lazy as _,
 )
 from django.views.generic.base import TemplateResponseMixin
+from django_scopes import scopes_disabled
 
 from pretix.base.models import Order
-from pretix.base.models.orders import InvoiceAddress
+from pretix.base.models.orders import InvoiceAddress, OrderPayment
 from pretix.base.services.cart import (
     get_fees, set_cart_addons, update_tax_rates,
 )
@@ -28,7 +30,9 @@ from pretix.presale.signals import (
     checkout_all_optional, checkout_confirm_messages, checkout_flow_steps,
     contact_form_fields, order_meta_from_request, question_form_fields,
 )
-from pretix.presale.views import CartMixin, get_cart, get_cart_total
+from pretix.presale.views import (
+    CartMixin, get_cart, get_cart_is_free, get_cart_total,
+)
 from pretix.presale.views.cart import (
     cart_session, create_empty_cart_id, get_or_create_cart_id,
 )
@@ -112,7 +116,10 @@ class BaseCheckoutFlowStep:
                 self.request._checkout_flow_invoice_address = InvoiceAddress()
             else:
                 try:
-                    self.request._checkout_flow_invoice_address = InvoiceAddress.objects.get(pk=iapk, order__isnull=True)
+                    with scopes_disabled():
+                        self.request._checkout_flow_invoice_address = InvoiceAddress.objects.get(
+                            pk=iapk, order__isnull=True
+                        )
                 except InvoiceAddress.DoesNotExist:
                     self.request._checkout_flow_invoice_address = InvoiceAddress()
         return self.request._checkout_flow_invoice_address
@@ -196,7 +203,7 @@ class AddOnsStep(CartMixin, AsyncAction, TemplateFlowStep):
         ):
             a = cartpos.addons.all()
             for iao in cartpos.item.addons.all():
-                found = len([1 for p in a if p.item.category_id == iao.addon_category_id])
+                found = len([1 for p in a if p.item.category_id == iao.addon_category_id and not p.is_bundled])
                 if found < iao.min_count or found > iao.max_count:
                     self._completed = False
                     return False
@@ -216,7 +223,7 @@ class AddOnsStep(CartMixin, AsyncAction, TemplateFlowStep):
             'item__addons', 'item__addons__addon_category', 'addons', 'addons__variation',
         ).order_by('pk'):
             current_addon_products = {
-                a.item_id: a.variation_id for a in cartpos.addons.all()
+                a.item_id: a.variation_id for a in cartpos.addons.all() if not a.is_bundled
             }
             formsetentry = {
                 'cartpos': cartpos,
@@ -232,14 +239,15 @@ class AddOnsStep(CartMixin, AsyncAction, TemplateFlowStep):
                     'form': AddOnsForm(
                         event=self.request.event,
                         prefix='{}_{}'.format(cartpos.pk, iao.addon_category.pk),
-                        category=iao.addon_category,
+                        base_position=cartpos,
+                        iao=iao,
                         price_included=iao.price_included,
                         initial=current_addon_products,
                         data=(self.request.POST if self.request.method == 'POST' else None),
                         quota_cache=quota_cache,
                         item_cache=item_cache,
                         subevent=cartpos.subevent,
-                        sales_channel=self.request.sales_channel
+                        sales_channel=self.request.sales_channel.identifier
                     )
                 }
 
@@ -298,7 +306,7 @@ class AddOnsStep(CartMixin, AsyncAction, TemplateFlowStep):
 
         return self.do(self.request.event.id, data, get_or_create_cart_id(self.request),
                        invoice_address=self.invoice_address.pk, locale=get_language(),
-                       sales_channel=request.sales_channel)
+                       sales_channel=request.sales_channel.identifier)
 
 
 class QuestionsStep(QuestionsViewMixin, CartMixin, TemplateFlowStep):
@@ -338,20 +346,23 @@ class QuestionsStep(QuestionsViewMixin, CartMixin, TemplateFlowStep):
 
     @cached_property
     def invoice_form(self):
-        initial = {
-            'name_parts': {
-                k[21:].replace('-', '_'): v
-                for k, v in self.cart_session.get('widget_data', {}).items()
-                if k.startswith('invoice-address-name-')
-            },
-            'company': self.cart_session.get('widget_data', {}).get('invoice-address-company', ''),
-            'is_business': bool(self.cart_session.get('widget_data', {}).get('invoice-address-company', '')),
-            'street': self.cart_session.get('widget_data', {}).get('invoice-address-street', ''),
-            'zipcode': self.cart_session.get('widget_data', {}).get('invoice-address-zipcode', ''),
-            'city': self.cart_session.get('widget_data', {}).get('invoice-address-city', ''),
-            'country': self.cart_session.get('widget_data', {}).get('invoice-address-country', ''),
-        }
-        if not self.request.event.settings.invoice_address_asked and self.request.event.settings.invoice_name_required:
+        if not self.invoice_address.pk:
+            initial = {
+                'name_parts': {
+                    k[21:].replace('-', '_'): v
+                    for k, v in self.cart_session.get('widget_data', {}).items()
+                    if k.startswith('invoice-address-name-')
+                },
+                'company': self.cart_session.get('widget_data', {}).get('invoice-address-company', ''),
+                'is_business': bool(self.cart_session.get('widget_data', {}).get('invoice-address-company', '')),
+                'street': self.cart_session.get('widget_data', {}).get('invoice-address-street', ''),
+                'zipcode': self.cart_session.get('widget_data', {}).get('invoice-address-zipcode', ''),
+                'city': self.cart_session.get('widget_data', {}).get('invoice-address-city', ''),
+                'country': self.cart_session.get('widget_data', {}).get('invoice-address-country', ''),
+            }
+        else:
+            initial = {}
+        if not self.address_asked and self.request.event.settings.invoice_name_required:
             return InvoiceNameForm(data=self.request.POST if self.request.method == "POST" else None,
                                    event=self.request.event,
                                    request=self.request,
@@ -365,10 +376,17 @@ class QuestionsStep(QuestionsViewMixin, CartMixin, TemplateFlowStep):
                                   instance=self.invoice_address,
                                   validate_vat_id=self.eu_reverse_charge_relevant, all_optional=self.all_optional)
 
+    @cached_property
+    def address_asked(self):
+        return (
+            self.request.event.settings.invoice_address_asked
+            and (not self.request.event.settings.invoice_address_not_asked_free or not get_cart_is_free(self.request))
+        )
+
     def post(self, request):
         self.request = request
         failed = not self.save() or not self.contact_form.is_valid()
-        if request.event.settings.invoice_address_asked or self.request.event.settings.invoice_name_required:
+        if self.address_asked or self.request.event.settings.invoice_name_required:
             failed = failed or not self.invoice_form.is_valid()
         if failed:
             messages.error(request,
@@ -376,7 +394,7 @@ class QuestionsStep(QuestionsViewMixin, CartMixin, TemplateFlowStep):
             return self.render()
         self.cart_session['email'] = self.contact_form.cleaned_data['email']
         self.cart_session['contact_form_data'] = self.contact_form.cleaned_data
-        if request.event.settings.invoice_address_asked or self.request.event.settings.invoice_name_required:
+        if self.address_asked or self.request.event.settings.invoice_name_required:
             addr = self.invoice_form.save()
             self.cart_session['invoice_address'] = addr.pk
 
@@ -404,9 +422,11 @@ class QuestionsStep(QuestionsViewMixin, CartMixin, TemplateFlowStep):
             return False
 
         if not self.all_optional:
-            if request.event.settings.invoice_address_required and (not self.invoice_address or not self.invoice_address.street):
-                messages.warning(request, _('Please enter your invoicing address.'))
-                return False
+
+            if self.address_asked:
+                if request.event.settings.invoice_address_required and (not self.invoice_address or not self.invoice_address.street):
+                    messages.warning(request, _('Please enter your invoicing address.'))
+                    return False
 
             if request.event.settings.invoice_name_required and (not self.invoice_address or not self.invoice_address.name):
                 messages.warning(request, _('Please enter your name.'))
@@ -420,23 +440,24 @@ class QuestionsStep(QuestionsViewMixin, CartMixin, TemplateFlowStep):
                 q.pk: q for q in cp.item.questions_to_ask
             }
 
-            def question_is_visible(parentid, qval):
+            def question_is_visible(parentid, qvals):
+                if parentid not in question_cache:
+                    return False
                 parentq = question_cache[parentid]
-                if parentq.dependency_question_id and not question_is_visible(parentq.dependency_question_id, parentq.dependency_value):
+                if parentq.dependency_question_id and not question_is_visible(parentq.dependency_question_id, parentq.dependency_values):
                     return False
                 if parentid not in answ:
                     return False
-                if qval == 'True':
-                    return answ[parentid].answer == 'True'
-                elif qval == 'False':
-                    return answ[parentid].answer == 'False'
-                else:
-                    return qval in [o.identifier for o in answ[parentid].options.all()]
+                return (
+                    ('True' in qvals and answ[parentid].answer == 'True')
+                    or ('False' in qvals and answ[parentid].answer == 'False')
+                    or (any(qval in [o.identifier for o in answ[parentid].options.all()] for qval in qvals))
+                )
 
             def question_is_required(q):
                 return (
                     q.required and
-                    (not q.dependency_question_id or question_is_visible(q.dependency_question_id, q.dependency_value))
+                    (not q.dependency_question_id or question_is_visible(q.dependency_question_id, q.dependency_values))
                 )
 
             for q in cp.item.questions_to_ask:
@@ -471,6 +492,7 @@ class QuestionsStep(QuestionsViewMixin, CartMixin, TemplateFlowStep):
         ctx['reverse_charge_relevant'] = self.eu_reverse_charge_relevant
         ctx['cart'] = self.get_cart()
         ctx['cart_session'] = self.cart_session
+        ctx['invoice_address_asked'] = self.address_asked
         return ctx
 
 
@@ -494,9 +516,9 @@ class PaymentStep(QuestionsViewMixin, CartMixin, TemplateFlowStep):
             if not provider.is_enabled or not self._is_allowed(provider, self.request):
                 continue
             fee = provider.calculate_fee(self._total_order_value)
-            try:
+            if 'total' in inspect.signature(provider.payment_form_render).parameters:
                 form = provider.payment_form_render(self.request, self._total_order_value + fee)
-            except TypeError:
+            else:
                 form = provider.payment_form_render(self.request)
             providers.append({
                 'provider': provider,
@@ -591,6 +613,13 @@ class ConfirmStep(CartMixin, AsyncAction, TemplateFlowStep):
     def is_completed(self, request, warn=False):
         pass
 
+    @cached_property
+    def address_asked(self):
+        return (
+            self.request.event.settings.invoice_address_asked
+            and (not self.request.event.settings.invoice_address_not_asked_free or not get_cart_is_free(self.request))
+        )
+
     def get_context_data(self, **kwargs):
         ctx = super().get_context_data(**kwargs)
         ctx['cart'] = self.get_cart(answers=True)
@@ -601,6 +630,9 @@ class ConfirmStep(CartMixin, AsyncAction, TemplateFlowStep):
         ctx['addr'] = self.invoice_address
         ctx['confirm_messages'] = self.confirm_messages
         ctx['cart_session'] = self.cart_session
+        ctx['invoice_address_asked'] = self.address_asked
+
+        self.cart_session['shown_total'] = str(ctx['cart']['total'])
 
         email = self.cart_session.get('contact_form_data', {}).get('email')
         if email != settings.PRETIX_EMAIL_NONE_VALUE:
@@ -679,7 +711,8 @@ class ConfirmStep(CartMixin, AsyncAction, TemplateFlowStep):
         return self.do(self.request.event.id, self.payment_provider.identifier if self.payment_provider else None,
                        [p.id for p in self.positions], self.cart_session.get('email'),
                        translation.get_language(), self.invoice_address.pk, meta_info,
-                       request.sales_channel)
+                       request.sales_channel.identifier, self.cart_session.get('gift_cards'),
+                       self.cart_session.get('shown_total'))
 
     def get_success_message(self, value):
         create_empty_cart_id(self.request)
@@ -698,7 +731,7 @@ class ConfirmStep(CartMixin, AsyncAction, TemplateFlowStep):
         return self.get_step_url(self.request)
 
     def get_order_url(self, order):
-        payment = order.payments.first()
+        payment = order.payments.filter(state=OrderPayment.PAYMENT_STATE_CREATED).first()
         if not payment:
             return eventreverse(self.request.event, 'presale:event.order', kwargs={
                 'order': order.code,

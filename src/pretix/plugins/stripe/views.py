@@ -17,15 +17,22 @@ from django.views import View
 from django.views.decorators.clickjacking import xframe_options_exempt
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_POST
+from django.views.generic import FormView
+from django_scopes import scopes_disabled
 
-from pretix.base.models import Event, Order, OrderPayment, Quota
+from pretix.base.models import Event, Order, OrderPayment, Organizer, Quota
 from pretix.base.payment import PaymentException
 from pretix.base.services.locking import LockTimeoutException
 from pretix.base.settings import GlobalSettingsObject
-from pretix.control.permissions import event_permission_required
+from pretix.control.permissions import (
+    AdministratorPermissionRequiredMixin, event_permission_required,
+)
+from pretix.control.views.event import DecoupleMixin
+from pretix.control.views.organizer import OrganizerDetailViewMixin
 from pretix.multidomain.urlreverse import eventreverse
+from pretix.plugins.stripe.forms import OrganizerStripeSettingsForm
 from pretix.plugins.stripe.models import ReferencedStripeObject
-from pretix.plugins.stripe.payment import StripeCC
+from pretix.plugins.stripe.payment import StripeCC, StripeSettingsHolder
 from pretix.plugins.stripe.tasks import (
     get_domain_for_event, stripe_verify_domain,
 )
@@ -48,6 +55,7 @@ def redirect_view(request, *args, **kwargs):
     return r
 
 
+@scopes_disabled()
 def oauth_return(request, *args, **kwargs):
     if 'payment_stripe_oauth_event' not in request.session:
         messages.error(request, _('An error occurred during connecting with Stripe, please try again.'))
@@ -140,6 +148,7 @@ def oauth_return(request, *args, **kwargs):
 
 @csrf_exempt
 @require_POST
+@scopes_disabled()
 def webhook(request, *args, **kwargs):
     event_json = json.loads(request.body.decode('utf-8'))
 
@@ -157,6 +166,9 @@ def webhook(request, *args, **kwargs):
     elif event_json['data']['object']['object'] == "source":
         func = source_webhook
         objid = event_json['data']['object']['id']
+    elif event_json['data']['object']['object'] == "payment_intent":
+        func = paymentintent_webhook
+        objid = event_json['data']['object']['id']
     else:
         return HttpResponse("Not interested in this data type", status=200)
 
@@ -164,9 +176,24 @@ def webhook(request, *args, **kwargs):
         rso = ReferencedStripeObject.objects.select_related('order', 'order__event').get(reference=objid)
         return func(rso.order.event, event_json, objid, rso)
     except ReferencedStripeObject.DoesNotExist:
-        if hasattr(request, 'event'):
+        if event_json['data']['object']['object'] == "charge" and 'payment_intent' in event_json['data']['object']:
+            # If we receive a charge webhook *before* the payment intent webhook, we don't know the charge ID yet
+            # and can't match it -- but we know the payment intent ID!
+            try:
+                rso = ReferencedStripeObject.objects.select_related('order', 'order__event').get(
+                    reference=event_json['data']['object']['payment_intent']
+                )
+                return func(rso.order.event, event_json, objid, rso)
+            except ReferencedStripeObject.DoesNotExist:
+                return HttpResponse("Unable to detect event", status=200)
+        elif hasattr(request, 'event') and func != paymentintent_webhook:
+            # This is a legacy integration from back when didn't have ReferencedStripeObject. This can't happen for
+            # payment intents or charges connected with payment intents since they didn't exist back then. Our best
+            # hope is to go for request.event and see if we can find the order ID.
             return func(request.event, event_json, objid, None)
         else:
+            # Okay, this is probably not an event that concerns us, maybe other applications talk to the same stripe
+            # account
             return HttpResponse("Unable to detect event", status=200)
 
 
@@ -184,6 +211,7 @@ SOURCE_TYPES = {
 def charge_webhook(event, event_json, charge_id, rso):
     prov = StripeCC(event)
     prov._init_api()
+
     try:
         charge = stripe.Charge.retrieve(charge_id, expand=['dispute'], **prov.api_kwargs)
     except stripe.error.StripeError:
@@ -348,6 +376,29 @@ def source_webhook(event, event_json, source_id, rso):
                 'info': str(src)
             })
             payment.save()
+        elif src.status == 'canceled' and payment.state in (OrderPayment.PAYMENT_STATE_PENDING, OrderPayment.PAYMENT_STATE_CREATED):
+            payment.info = str(src)
+            payment.state = OrderPayment.PAYMENT_STATE_CANCELED
+            payment.save()
+
+    return HttpResponse(status=200)
+
+
+def paymentintent_webhook(event, event_json, paymentintent_id, rso):
+    prov = StripeCC(event)
+    prov._init_api()
+
+    try:
+        paymentintent = stripe.PaymentIntent.retrieve(paymentintent_id, **prov.api_kwargs)
+    except stripe.error.StripeError:
+        logger.exception('Stripe error on webhook. Event data: %s' % str(event_json))
+        return HttpResponse('Charge not found', status=500)
+
+    for charge in paymentintent.charges.data:
+        ReferencedStripeObject.objects.get_or_create(
+            reference=charge.id,
+            defaults={'order': rso.payment.order, 'payment': rso.payment}
+        )
 
     return HttpResponse(status=200)
 
@@ -402,13 +453,31 @@ class StripeOrderView:
     def pprov(self):
         return self.request.event.get_payment_providers()[self.payment.provider]
 
+    def _redirect_to_order(self):
+        if self.request.session.get('payment_stripe_order_secret') != self.order.secret:
+            messages.error(self.request, _('Sorry, there was an error in the payment process. Please check the link '
+                                           'in your emails to continue.'))
+            return redirect(eventreverse(self.request.event, 'presale:event.index'))
+
+        return redirect(eventreverse(self.request.event, 'presale:event.order', kwargs={
+            'order': self.order.code,
+            'secret': self.order.secret
+        }) + ('?paid=yes' if self.order.status == Order.STATUS_PAID else ''))
+
 
 @method_decorator(xframe_options_exempt, 'dispatch')
 class ReturnView(StripeOrderView, View):
     def get(self, request, *args, **kwargs):
         prov = self.pprov
         prov._init_api()
-        src = stripe.Source.retrieve(request.GET.get('source'), **prov.api_kwargs)
+        try:
+            src = stripe.Source.retrieve(request.GET.get('source'), **prov.api_kwargs)
+        except stripe.error.InvalidRequestError:
+            logger.exception('Could not retrieve source')
+            messages.error(self.request, _('Sorry, there was an error in the payment process. Please check the link '
+                                           'in your emails to continue.'))
+            return redirect(eventreverse(self.request.event, 'presale:event.index'))
+
         if src.client_secret != request.GET.get('client_secret'):
             messages.error(self.request, _('Sorry, there was an error in the payment process. Please check the link '
                                            'in your emails to continue.'))
@@ -453,13 +522,101 @@ class ReturnView(StripeOrderView, View):
                                                'get in touch with us if this problem persists.'))
         return self._redirect_to_order()
 
-    def _redirect_to_order(self):
-        if self.request.session.get('payment_stripe_order_secret') != self.order.secret:
-            messages.error(self.request, _('Sorry, there was an error in the payment process. Please check the link '
-                                           'in your emails to continue.'))
-            return redirect(eventreverse(self.request.event, 'presale:event.index'))
 
-        return redirect(eventreverse(self.request.event, 'presale:event.order', kwargs={
-            'order': self.order.code,
-            'secret': self.order.secret
-        }) + ('?paid=yes' if self.order.status == Order.STATUS_PAID else ''))
+@method_decorator(xframe_options_exempt, 'dispatch')
+class ScaView(StripeOrderView, View):
+
+    def get(self, request, *args, **kwargs):
+        prov = self.pprov
+        prov._init_api()
+
+        if self.payment.state in (OrderPayment.PAYMENT_STATE_CONFIRMED,
+                                  OrderPayment.PAYMENT_STATE_CANCELED,
+                                  OrderPayment.PAYMENT_STATE_FAILED):
+            return self._redirect_to_order()
+
+        payment_info = json.loads(self.payment.info)
+
+        if 'id' in payment_info:
+            try:
+                intent = stripe.PaymentIntent.retrieve(
+                    payment_info['id'],
+                    **prov.api_kwargs
+                )
+            except stripe.error.InvalidRequestError:
+                logger.exception('Could not retrieve payment intent')
+                messages.error(self.request, _('Sorry, there was an error in the payment process.'))
+                return self._redirect_to_order()
+        else:
+            messages.error(self.request, _('Sorry, there was an error in the payment process.'))
+            return self._redirect_to_order()
+
+        if intent.status == 'requires_action' and intent.next_action.type in ['use_stripe_sdk', 'redirect_to_url']:
+            ctx = {
+                'order': self.order,
+                'stripe_settings': StripeSettingsHolder(self.order.event).settings,
+            }
+            if intent.next_action.type == 'use_stripe_sdk':
+                ctx['payment_intent_client_secret'] = intent.client_secret
+            elif intent.next_action.type == 'redirect_to_url':
+                ctx['payment_intent_next_action_redirect_url'] = intent.next_action.redirect_to_url['url']
+
+            r = render(request, 'pretixplugins/stripe/sca.html', ctx)
+            r._csp_ignore = True
+            return r
+        else:
+            try:
+                prov._handle_payment_intent(request, self.payment, intent)
+            except PaymentException as e:
+                messages.error(request, str(e))
+
+            return self._redirect_to_order()
+
+
+@method_decorator(xframe_options_exempt, 'dispatch')
+class ScaReturnView(StripeOrderView, View):
+    def get(self, request, *args, **kwargs):
+        prov = self.pprov
+
+        try:
+            prov._handle_payment_intent(request, self.payment)
+        except PaymentException as e:
+            messages.error(request, str(e))
+
+        self.order.refresh_from_db()
+
+        return render(request, 'pretixplugins/stripe/sca_return.html', {'order': self.order})
+
+
+class OrganizerSettingsFormView(DecoupleMixin, OrganizerDetailViewMixin, AdministratorPermissionRequiredMixin, FormView):
+    model = Organizer
+    permission = 'can_change_organizer_settings'
+    form_class = OrganizerStripeSettingsForm
+    template_name = 'pretixplugins/stripe/organizer_stripe.html'
+
+    def get_success_url(self):
+        return reverse('plugins:stripe:settings.connect', kwargs={
+            'organizer': self.request.organizer.slug,
+        })
+
+    def get_form_kwargs(self):
+        kwargs = super().get_form_kwargs()
+        kwargs['obj'] = self.request.organizer
+        return kwargs
+
+    @transaction.atomic
+    def post(self, request, *args, **kwargs):
+        form = self.get_form()
+        if form.is_valid():
+            form.save()
+            if form.has_changed():
+                self.request.organizer.log_action(
+                    'pretix.organizer.settings', user=self.request.user, data={
+                        k: form.cleaned_data.get(k) for k in form.changed_data
+                    }
+                )
+            messages.success(self.request, _('Your changes have been saved.'))
+            return redirect(self.get_success_url())
+        else:
+            messages.error(self.request, _('We could not save your changes. See below for details.'))
+            return self.get(request)

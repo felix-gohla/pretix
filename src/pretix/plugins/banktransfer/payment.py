@@ -102,7 +102,12 @@ class BankTransfer(BasePaymentProvider):
                 label=_('Payment method name'),
                 widget=I18nTextInput,
                 required=False
-            ))
+            )),
+            ('omit_hyphen', forms.BooleanField(
+                label=_('Do not include a hypen in the payment reference.'),
+                help_text=_('This is required in some countries.'),
+                required=False
+            )),
         ])
 
     @property
@@ -116,22 +121,14 @@ class BankTransfer(BasePaymentProvider):
 
     @property
     def settings_form_fields(self):
-        d = OrderedDict(
-            list(super().settings_form_fields.items()) + list(BankTransfer.form_fields().items()) + [
-                ('omit_hyphen', forms.BooleanField(
-                    label=_('Do not include a hypen in the payment reference.'),
-                    help_text=_('This is required in some countries.'),
-                    required=False
-                )),
-
-            ]
-        )
+        d = OrderedDict(list(super().settings_form_fields.items()) + list(BankTransfer.form_fields().items()))
         d.move_to_end('bank_details', last=False)
         d.move_to_end('bank_details_sepa_bank', last=False)
         d.move_to_end('bank_details_sepa_bic', last=False)
         d.move_to_end('bank_details_sepa_iban', last=False)
         d.move_to_end('bank_details_sepa_name', last=False)
         d.move_to_end('bank_details_type', last=False)
+        d.move_to_end('ack', last=False)
         d.move_to_end('_enabled', last=False)
         return d
 
@@ -171,7 +168,7 @@ class BankTransfer(BasePaymentProvider):
     def checkout_confirm_render(self, request):
         return self.payment_form_render(request)
 
-    def order_pending_mail_render(self, order) -> str:
+    def order_pending_mail_render(self, order, payment) -> str:
         template = get_template('pretixplugins/banktransfer/email/order_pending.txt')
         bankdetails = []
         if self.settings.get('bank_details_type') == 'sepa':
@@ -188,6 +185,7 @@ class BankTransfer(BasePaymentProvider):
             'event': self.event,
             'order': order,
             'code': self._code(order),
+            'amount': payment.amount,
             'details': textwrap.indent(''.join(str(i) for i in bankdetails), '    '),
         }
         return template.render(ctx)

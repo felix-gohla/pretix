@@ -6,6 +6,9 @@ from django.urls import reverse
 from django.utils.translation import (
     pgettext_lazy, ugettext as __, ugettext_lazy as _,
 )
+from django_scopes.forms import (
+    SafeModelChoiceField, SafeModelMultipleChoiceField,
+)
 from i18nfield.forms import I18nFormField, I18nTextarea
 
 from pretix.base.channels import get_all_sales_channels
@@ -13,7 +16,7 @@ from pretix.base.forms import I18nFormSet, I18nModelForm
 from pretix.base.models import (
     Item, ItemCategory, ItemVariation, Question, QuestionOption, Quota,
 )
-from pretix.base.models.items import ItemAddOn
+from pretix.base.models.items import ItemAddOn, ItemBundle
 from pretix.base.signals import item_copy_data
 from pretix.control.forms import SplitDateTimeField, SplitDateTimePickerWidget
 from pretix.control.forms.widgets import Select2
@@ -43,19 +46,29 @@ class QuestionForm(I18nModelForm):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.fields['items'].queryset = self.instance.event.items.all()
+        self.fields['items'].required = True
         self.fields['dependency_question'].queryset = self.instance.event.questions.filter(
-            type__in=(Question.TYPE_BOOLEAN, Question.TYPE_CHOICE, Question.TYPE_CHOICE_MULTIPLE)
+            type__in=(Question.TYPE_BOOLEAN, Question.TYPE_CHOICE, Question.TYPE_CHOICE_MULTIPLE),
+            ask_during_checkin=False
         )
         if self.instance.pk:
             self.fields['dependency_question'].queryset = self.fields['dependency_question'].queryset.exclude(
                 pk=self.instance.pk
             )
         self.fields['identifier'].required = False
+        self.fields['dependency_values'].required = False
         self.fields['help_text'].widget.attrs['rows'] = 3
+
+    def clean_dependency_values(self):
+        val = self.data.getlist('dependency_values')
+        return val
 
     def clean_dependency_question(self):
         dep = val = self.cleaned_data.get('dependency_question')
         if dep:
+            if dep.ask_during_checkin:
+                raise ValidationError(_('Question cannot depend on a question asked during check-in.'))
+
             seen_ids = {self.instance.pk} if self.instance else set()
             while dep:
                 if dep.pk in seen_ids:
@@ -66,8 +79,8 @@ class QuestionForm(I18nModelForm):
 
     def clean(self):
         d = super().clean()
-        if d.get('dependency_question') and not d.get('dependency_value'):
-            raise ValidationError({'dependency_value': [_('This field is required')]})
+        if d.get('dependency_question') and not d.get('dependency_values'):
+            raise ValidationError({'dependency_values': [_('This field is required')]})
         if d.get('dependency_question') and d.get('ask_during_checkin'):
             raise ValidationError(_('Dependencies between questions are not supported during check-in.'))
         return d
@@ -81,16 +94,22 @@ class QuestionForm(I18nModelForm):
             'type',
             'required',
             'ask_during_checkin',
+            'hidden',
             'identifier',
             'items',
             'dependency_question',
-            'dependency_value'
+            'dependency_values',
+            'print_on_invoice',
         ]
         widgets = {
             'items': forms.CheckboxSelectMultiple(
                 attrs={'class': 'scrolling-multiple-choice'}
             ),
-            'dependency_value': forms.Select,
+            'dependency_values': forms.SelectMultiple,
+        }
+        field_classes = {
+            'items': SafeModelMultipleChoiceField,
+            'dependency_question': SafeModelChoiceField,
         }
 
 
@@ -110,7 +129,7 @@ class QuotaForm(I18nModelForm):
         items = kwargs.pop('items', None) or self.event.items.prefetch_related('variations')
         self.original_instance = modelcopy(self.instance) if self.instance else None
         initial = kwargs.get('initial', {})
-        if self.instance and self.instance.pk:
+        if self.instance and self.instance.pk and 'itemvars' not in initial:
             initial['itemvars'] = [str(i.pk) for i in self.instance.items.all()] + [
                 '{}-{}'.format(v.item_id, v.pk) for v in self.instance.variations.all()
             ]
@@ -155,8 +174,12 @@ class QuotaForm(I18nModelForm):
         fields = [
             'name',
             'size',
-            'subevent'
+            'subevent',
+            'close_when_sold_out'
         ]
+        field_classes = {
+            'subevent': SafeModelChoiceField,
+        }
 
     def save(self, *args, **kwargs):
         creating = not self.instance.pk
@@ -204,6 +227,8 @@ class ItemCreateForm(I18nModelForm):
             empty_label=_('Do not copy'),
             required=False
         )
+        if self.event.tax_rules.exists():
+            self.fields['tax_rule'].required = True
 
         if not self.event.has_subevents:
             choices = [
@@ -300,6 +325,12 @@ class ItemCreateForm(I18nModelForm):
         if self.cleaned_data.get('copy_from'):
             for question in self.cleaned_data['copy_from'].questions.all():
                 question.items.add(instance)
+            for a in self.cleaned_data['copy_from'].addons.all():
+                instance.addons.create(addon_category=a.addon_category, min_count=a.min_count, max_count=a.max_count,
+                                       price_included=a.price_included, position=a.position)
+            for b in self.cleaned_data['copy_from'].bundles.all():
+                instance.bundles.create(bundled_item=b.bundled_item, bundled_variation=b.bundled_variation,
+                                        count=b.count, designated_price=b.designated_price)
 
             item_copy_data.send(sender=self.event, source=self.cleaned_data['copy_from'], target=instance)
 
@@ -332,16 +363,25 @@ class ItemCreateForm(I18nModelForm):
             'admission',
             'default_price',
             'tax_rule',
-            'allow_cancel'
         ]
+
+
+class ShowQuotaNullBooleanSelect(forms.NullBooleanSelect):
+    def __init__(self, attrs=None):
+        choices = (
+            ('unknown', _('(Event default)')),
+            ('true', _('Yes')),
+            ('false', _('No')),
+        )
+        super(forms.NullBooleanSelect, self).__init__(attrs, choices)
 
 
 class TicketNullBooleanSelect(forms.NullBooleanSelect):
     def __init__(self, attrs=None):
         choices = (
-            ('1', _('Choose automatically depending on event settings')),
-            ('2', _('Yes, if ticket generation is enabled in general')),
-            ('3', _('Never')),
+            ('unknown', _('Choose automatically depending on event settings')),
+            ('true', _('Yes, if ticket generation is enabled in general')),
+            ('false', _('Never')),
         )
         super(forms.NullBooleanSelect, self).__init__(attrs, choices)
 
@@ -356,6 +396,8 @@ class ItemUpdateForm(I18nModelForm):
             'over 65. This ticket includes access to all parts of the event, except the VIP '
             'area.'
         )
+        if self.event.tax_rules.exists():
+            self.fields['tax_rule'].required = True
         self.fields['description'].widget.attrs['rows'] = '4'
         self.fields['sales_channels'] = forms.MultipleChoiceField(
             label=_('Sales channels'),
@@ -365,6 +407,36 @@ class ItemUpdateForm(I18nModelForm):
             widget=forms.CheckboxSelectMultiple
         )
         change_decimal_field(self.fields['default_price'], self.event.currency)
+        self.fields['hidden_if_available'].queryset = self.event.quotas.all()
+        self.fields['hidden_if_available'].widget = Select2(
+            attrs={
+                'data-model-select2': 'generic',
+                'data-select2-url': reverse('control:event.items.quotas.select2', kwargs={
+                    'event': self.event.slug,
+                    'organizer': self.event.organizer.slug,
+                }),
+                'data-placeholder': _('Quota')
+            }
+        )
+        self.fields['hidden_if_available'].widget.choices = self.fields['hidden_if_available'].choices
+        self.fields['hidden_if_available'].required = False
+
+    def clean(self):
+        d = super().clean()
+        if d['issue_giftcard']:
+            if d['tax_rule'] and d['tax_rule'].rate > 0:
+                self.add_error(
+                    'tax_rule',
+                    _("Gift card products should not be associated with non-zero tax rates since sales tax will be applied when the gift card is redeemed.")
+                )
+            if d['admission']:
+                self.add_error(
+                    'admission',
+                    _(
+                        "Gift card products should not be admission products at the same time."
+                    )
+                )
+        return d
 
     class Meta:
         model = Item
@@ -387,24 +459,34 @@ class ItemUpdateForm(I18nModelForm):
             'require_approval',
             'hide_without_voucher',
             'allow_cancel',
+            'allow_waitinglist',
             'max_per_order',
             'min_per_order',
             'checkin_attention',
             'generate_tickets',
-            'original_price'
+            'original_price',
+            'require_bundling',
+            'show_quota_left',
+            'hidden_if_available',
+            'issue_giftcard',
         ]
         field_classes = {
             'available_from': SplitDateTimeField,
             'available_until': SplitDateTimeField,
+            'hidden_if_available': SafeModelChoiceField,
         }
         widgets = {
             'available_from': SplitDateTimePickerWidget(),
             'available_until': SplitDateTimePickerWidget(attrs={'data-date-after': '#id_available_from_0'}),
-            'generate_tickets': TicketNullBooleanSelect()
+            'generate_tickets': TicketNullBooleanSelect(),
+            'show_quota_left': ShowQuotaNullBooleanSelect()
         }
 
 
 class ItemVariationsFormSet(I18nFormSet):
+    template = "pretixcontrol/item/include_variations.html"
+    title = _('Variations')
+
     def clean(self):
         super().clean()
         for f in self.forms:
@@ -455,11 +537,15 @@ class ItemVariationForm(I18nModelForm):
             'value',
             'active',
             'default_price',
+            'original_price',
             'description',
         ]
 
 
 class ItemAddOnsFormSet(I18nFormSet):
+    title = _('Add-ons')
+    template = "pretixcontrol/item/include_addons.html"
+
     def __init__(self, *args, **kwargs):
         self.event = kwargs.get('event')
         super().__init__(*args, **kwargs)
@@ -522,3 +608,103 @@ class ItemAddOnForm(I18nModelForm):
             'min_count': _('Be aware that setting a minimal number makes it impossible to buy this product if all '
                            'available add-ons are sold out.')
         }
+
+
+class ItemBundleFormSet(I18nFormSet):
+    template = "pretixcontrol/item/include_bundles.html"
+    title = _('Bundled products')
+
+    def __init__(self, *args, **kwargs):
+        self.event = kwargs.get('event')
+        self.item = kwargs.pop('item')
+        super().__init__(*args, **kwargs)
+
+    def _construct_form(self, i, **kwargs):
+        kwargs['event'] = self.event
+        kwargs['item'] = self.item
+        return super()._construct_form(i, **kwargs)
+
+    @property
+    def empty_form(self):
+        self.is_valid()
+        form = self.form(
+            auto_id=self.auto_id,
+            prefix=self.add_prefix('__prefix__'),
+            empty_permitted=True,
+            use_required_attribute=False,
+            locales=self.locales,
+            item=self.item,
+            event=self.event
+        )
+        self.add_fields(form, None)
+        return form
+
+
+class ItemBundleForm(I18nModelForm):
+    itemvar = forms.ChoiceField(label=_('Bundled product'))
+
+    def __init__(self, *args, **kwargs):
+        self.item = kwargs.pop('item')
+        super().__init__(*args, **kwargs)
+        instance = kwargs.get('instance', None)
+        initial = kwargs.get('initial', {})
+
+        if instance:
+            try:
+                if instance.bundled_variation:
+                    initial['itemvar'] = '%d-%d' % (instance.bundled_item.pk, instance.bundled_variation.pk)
+                elif instance.bundled_item:
+                    initial['itemvar'] = str(instance.bundled_item.pk)
+            except Item.DoesNotExist:
+                pass
+
+        kwargs['initial'] = initial
+        super().__init__(*args, **kwargs)
+
+        choices = []
+        for i in self.event.items.prefetch_related('variations').all():
+            pname = str(i)
+            if not i.is_available():
+                pname += ' ({})'.format(_('inactive'))
+            variations = list(i.variations.all())
+
+            if variations:
+                for v in variations:
+                    choices.append(('%d-%d' % (i.pk, v.pk),
+                                    '%s – %s' % (pname, v.value)))
+            else:
+                choices.append((str(i.pk), '%s' % pname))
+        self.fields['itemvar'].choices = choices
+        change_decimal_field(self.fields['designated_price'], self.event.currency)
+
+    def clean(self):
+        d = super().clean()
+        if 'itemvar' in self.cleaned_data:
+            if '-' in self.cleaned_data['itemvar']:
+                itemid, varid = self.cleaned_data['itemvar'].split('-')
+            else:
+                itemid, varid = self.cleaned_data['itemvar'], None
+
+            item = Item.objects.get(pk=itemid, event=self.event)
+            if varid:
+                variation = ItemVariation.objects.get(pk=varid, item=item)
+            else:
+                variation = None
+
+            if item == self.item:
+                raise ValidationError(_("The bundled item must not be the same item as the bundling one."))
+            if item.bundles.exists():
+                raise ValidationError(_("The bundled item must not have bundles on its own."))
+
+            self.instance.bundled_item = item
+            self.instance.bundled_variation = variation
+
+        return d
+
+    class Meta:
+        model = ItemBundle
+        localized_fields = '__all__'
+        fields = [
+            'count',
+            'designated_price',
+        ]

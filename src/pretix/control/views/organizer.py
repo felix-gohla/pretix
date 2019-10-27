@@ -1,32 +1,42 @@
 import json
+from decimal import Decimal
 
 from django import forms
 from django.conf import settings
 from django.contrib import messages
-from django.core.exceptions import PermissionDenied
+from django.core.exceptions import PermissionDenied, ValidationError
 from django.core.files import File
 from django.db import transaction
-from django.db.models import Count, ProtectedError
+from django.db.models import (
+    Count, DecimalField, Max, Min, Prefetch, ProtectedError, Sum,
+)
+from django.db.models.functions import Coalesce, Greatest
 from django.forms import inlineformset_factory
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404, redirect
 from django.urls import reverse
 from django.utils.functional import cached_property
 from django.utils.translation import ugettext_lazy as _
+from django.views import View
 from django.views.generic import (
     CreateView, DeleteView, DetailView, FormView, ListView, UpdateView,
 )
 
 from pretix.api.models import WebHook
-from pretix.base.models import Device, Organizer, Team, TeamInvite, User
-from pretix.base.models.event import EventMetaProperty
+from pretix.base.auth import get_auth_backends
+from pretix.base.models import (
+    Device, GiftCard, Organizer, Team, TeamInvite, User,
+)
+from pretix.base.models.event import Event, EventMetaProperty, EventMetaValue
 from pretix.base.models.organizer import TeamAPIToken
 from pretix.base.services.mail import SendMailException, mail
-from pretix.control.forms.filter import OrganizerFilterForm
+from pretix.control.forms.filter import (
+    EventFilterForm, GiftCardFilterForm, OrganizerFilterForm,
+)
 from pretix.control.forms.organizer import (
-    DeviceForm, EventMetaPropertyForm, OrganizerDeleteForm,
-    OrganizerDisplaySettingsForm, OrganizerForm, OrganizerSettingsForm,
-    OrganizerUpdateForm, TeamForm, WebHookForm,
+    DeviceForm, EventMetaPropertyForm, GiftCardCreateForm, OrganizerDeleteForm,
+    OrganizerForm, OrganizerSettingsForm, OrganizerUpdateForm, TeamForm,
+    WebHookForm,
 )
 from pretix.control.permissions import (
     AdministratorPermissionRequiredMixin, OrganizerPermissionRequiredMixin,
@@ -86,18 +96,50 @@ class OrganizerDetailViewMixin:
         return self.request.organizer
 
 
-class OrganizerDetail(OrganizerDetailViewMixin, OrganizerPermissionRequiredMixin, DetailView):
-    model = Organizer
+class OrganizerDetail(OrganizerDetailViewMixin, OrganizerPermissionRequiredMixin, ListView):
+    model = Event
     template_name = 'pretixcontrol/organizers/detail.html'
     permission = None
-    context_object_name = 'organizer'
+    context_object_name = 'events'
+    paginate_by = 50
 
-    def get_object(self, queryset=None) -> Organizer:
+    @property
+    def organizer(self):
         return self.request.organizer
+
+    def get_queryset(self):
+        qs = self.request.user.get_events_with_any_permission(self.request).select_related('organizer').prefetch_related(
+            'organizer', '_settings_objects', 'organizer___settings_objects',
+            'organizer__meta_properties',
+            Prefetch(
+                'meta_values',
+                EventMetaValue.objects.select_related('property'),
+                to_attr='meta_values_cached'
+            )
+        ).filter(organizer=self.request.organizer).order_by('-date_from')
+        qs = qs.annotate(
+            min_from=Min('subevents__date_from'),
+            max_from=Max('subevents__date_from'),
+            max_to=Max('subevents__date_to'),
+            max_fromto=Greatest(Max('subevents__date_to'), Max('subevents__date_from'))
+        ).annotate(
+            order_from=Coalesce('min_from', 'date_from'),
+            order_to=Coalesce('max_fromto', 'max_to', 'max_from', 'date_to', 'date_from'),
+        )
+        if self.filter_form.is_valid():
+            qs = self.filter_form.filter_qs(qs)
+        return qs
+
+    @cached_property
+    def filter_form(self):
+        return EventFilterForm(data=self.request.GET, request=self.request, organizer=self.organizer)
 
     def get_context_data(self, **kwargs):
         ctx = super().get_context_data(**kwargs)
-        ctx['events'] = self.request.organizer.events.all()
+        ctx['filter_form'] = self.filter_form
+        ctx['meta_fields'] = [
+            self.filter_form['meta_{}'.format(p.name)] for p in self.organizer.meta_properties.all()
+        ]
         return ctx
 
 
@@ -138,39 +180,13 @@ class OrganizerSettingsFormView(OrganizerDetailViewMixin, OrganizerPermissionReq
             return self.get(request)
 
 
-class OrganizerDisplaySettings(OrganizerSettingsFormView):
-    model = Organizer
-    form_class = OrganizerDisplaySettingsForm
-    template_name = 'pretixcontrol/organizers/display.html'
-    permission = 'can_change_organizer_settings'
+class OrganizerDisplaySettings(OrganizerDetailViewMixin, OrganizerPermissionRequiredMixin, View):
+    permission = None
 
-    def get_success_url(self) -> str:
-        return reverse('control:organizer.display', kwargs={
+    def get(self, request, *wargs, **kwargs):
+        return redirect(reverse('control:organizer.edit', kwargs={
             'organizer': self.request.organizer.slug,
-        })
-
-    @transaction.atomic
-    def post(self, request, *args, **kwargs):
-        form = self.get_form()
-        if form.is_valid():
-            form.save()
-            if form.has_changed():
-                self.request.organizer.log_action(
-                    'pretix.organizer.settings', user=self.request.user, data={
-                        k: (form.cleaned_data.get(k).name
-                            if isinstance(form.cleaned_data.get(k), File)
-                            else form.cleaned_data.get(k))
-                        for k in form.changed_data
-                    }
-                )
-            regenerate_organizer_css.apply_async(args=(self.request.organizer.pk,))
-            messages.success(self.request, _('Your changes have been saved. Please note that it can '
-                                             'take a short period of time until your changes become '
-                                             'active.'))
-            return redirect(self.get_success_url())
-        else:
-            messages.error(self.request, _('We could not save your changes. See below for details.'))
-            return self.get(request)
+        }) + '#tab-0-3-open')
 
 
 class OrganizerDelete(AdministratorPermissionRequiredMixin, FormView):
@@ -247,6 +263,7 @@ class OrganizerUpdate(OrganizerPermissionRequiredMixin, UpdateView):
     def form_valid(self, form):
         self.save_formset(self.object)
         self.sform.save()
+        change_css = False
         if self.sform.has_changed():
             self.request.organizer.log_action(
                 'pretix.organizer.settings',
@@ -258,13 +275,25 @@ class OrganizerUpdate(OrganizerPermissionRequiredMixin, UpdateView):
                     for k in self.sform.changed_data
                 }
             )
+            display_properties = (
+                'primary_color', 'theme_color_success', 'theme_color_danger', 'primary_font',
+            )
+            if any(p in self.sform.changed_data for p in display_properties):
+                change_css = True
         if form.has_changed():
             self.request.organizer.log_action(
                 'pretix.organizer.changed',
                 user=self.request.user,
                 data={k: form.cleaned_data.get(k) for k in form.changed_data}
             )
-        messages.success(self.request, _('Your changes have been saved.'))
+
+        if change_css:
+            regenerate_organizer_css.apply_async(args=(self.request.organizer.pk,))
+            messages.success(self.request, _('Your changes have been saved. Please note that it can '
+                                             'take a short period of time until your changes become '
+                                             'active.'))
+        else:
+            messages.success(self.request, _('Your changes have been saved.'))
         return super().form_valid(form)
 
     def get_form_kwargs(self):
@@ -332,7 +361,7 @@ class OrganizerCreate(CreateView):
         ret = super().form_valid(form)
         t = Team.objects.create(
             organizer=form.instance, name=_('Administrators'),
-            all_events=True, can_create_events=True, can_change_teams=True,
+            all_events=True, can_create_events=True, can_change_teams=True, can_manage_gift_cards=True,
             can_change_organizer_settings=True, can_change_event_settings=True, can_change_items=True,
             can_view_orders=True, can_change_orders=True, can_view_vouchers=True, can_change_vouchers=True
         )
@@ -340,7 +369,9 @@ class OrganizerCreate(CreateView):
         return ret
 
     def get_success_url(self) -> str:
-        return reverse('control:organizers')
+        return reverse('control:organizer', kwargs={
+            'organizer': self.object.slug,
+        })
 
 
 class TeamListView(OrganizerDetailViewMixin, OrganizerPermissionRequiredMixin, ListView):
@@ -518,7 +549,7 @@ class TeamMemberView(OrganizerDetailViewMixin, OrganizerPermissionRequiredMixin,
         if 'remove-member' in request.POST:
             try:
                 user = User.objects.get(pk=request.POST.get('remove-member'))
-            except User.DoesNotExist:
+            except (User.DoesNotExist, ValueError):
                 pass
             else:
                 other_admin_teams = self.request.organizer.teams.exclude(pk=self.object.pk).filter(
@@ -542,7 +573,7 @@ class TeamMemberView(OrganizerDetailViewMixin, OrganizerPermissionRequiredMixin,
         elif 'remove-invite' in request.POST:
             try:
                 invite = self.object.invites.get(pk=request.POST.get('remove-invite'))
-            except TeamInvite.DoesNotExist:
+            except (TeamInvite.DoesNotExist, ValueError):
                 messages.error(self.request, _('Invalid invite selected.'))
                 return redirect(self.get_success_url())
             else:
@@ -555,10 +586,26 @@ class TeamMemberView(OrganizerDetailViewMixin, OrganizerPermissionRequiredMixin,
                 messages.success(self.request, _('The invite has been revoked.'))
                 return redirect(self.get_success_url())
 
+        elif 'resend-invite' in request.POST:
+            try:
+                invite = self.object.invites.get(pk=request.POST.get('resend-invite'))
+            except (TeamInvite.DoesNotExist, ValueError):
+                messages.error(self.request, _('Invalid invite selected.'))
+                return redirect(self.get_success_url())
+            else:
+                self._send_invite(invite)
+                self.object.log_action(
+                    'pretix.team.invite.resent', user=self.request.user, data={
+                        'email': invite.email
+                    }
+                )
+                messages.success(self.request, _('The invite has been resent.'))
+                return redirect(self.get_success_url())
+
         elif 'remove-token' in request.POST:
             try:
                 token = self.object.tokens.get(pk=request.POST.get('remove-token'))
-            except TeamAPIToken.DoesNotExist:
+            except (TeamAPIToken.DoesNotExist, ValueError):
                 messages.error(self.request, _('Invalid token selected.'))
                 return redirect(self.get_success_url())
             else:
@@ -579,6 +626,9 @@ class TeamMemberView(OrganizerDetailViewMixin, OrganizerPermissionRequiredMixin,
             except User.DoesNotExist:
                 if self.object.invites.filter(email__iexact=self.add_form.cleaned_data['user']).exists():
                     messages.error(self.request, _('This user already has been invited for this team.'))
+                    return self.get(request, *args, **kwargs)
+                if 'native' not in get_auth_backends():
+                    messages.error(self.request, _('Users need to have a pretix account before they can be invited.'))
                     return self.get(request, *args, **kwargs)
 
                 invite = self.object.invites.create(email=self.add_form.cleaned_data['user'])
@@ -636,7 +686,9 @@ class DeviceListView(OrganizerDetailViewMixin, OrganizerPermissionRequiredMixin,
     context_object_name = 'devices'
 
     def get_queryset(self):
-        return self.request.organizer.devices.prefetch_related('limit_events')
+        return self.request.organizer.devices.prefetch_related(
+            'limit_events'
+        ).order_by('-device_id')
 
 
 class DeviceCreateView(OrganizerDetailViewMixin, OrganizerPermissionRequiredMixin, CreateView):
@@ -756,7 +808,7 @@ class DeviceRevokeView(OrganizerDetailViewMixin, OrganizerPermissionRequiredMixi
 
     def post(self, request, *args, **kwargs):
         self.object = self.get_object()
-        self.object.api_token = None
+        self.object.revoked = True
         self.object.save()
         self.object.log_action('pretix.device.revoked', user=self.request.user)
         messages.success(request, _('Access for this device has been revoked.'))
@@ -870,3 +922,145 @@ class WebHookLogsView(OrganizerDetailViewMixin, OrganizerPermissionRequiredMixin
 
     def get_queryset(self):
         return self.webhook.calls.order_by('-datetime')
+
+
+class GiftCardListView(OrganizerDetailViewMixin, OrganizerPermissionRequiredMixin, ListView):
+    model = GiftCard
+    template_name = 'pretixcontrol/organizers/giftcards.html'
+    permission = 'can_manage_gift_cards'
+    context_object_name = 'giftcards'
+
+    def get_queryset(self):
+        qs = self.request.organizer.issued_gift_cards.annotate(
+            cached_value=Sum('transactions__value')
+        )
+        if self.filter_form.is_valid():
+            qs = self.filter_form.filter_qs(qs)
+        return qs
+
+    def post(self, request, *args, **kwargs):
+        if "add" in request.POST:
+            o = self.request.user.get_organizers_with_permission(
+                'can_manage_gift_cards', self.request
+            ).exclude(pk=self.request.organizer.pk).filter(
+                slug=request.POST.get("add")
+            ).first()
+            if o:
+                self.request.organizer.gift_card_issuer_acceptance.get_or_create(
+                    issuer=o
+                )
+                self.request.organizer.log_action(
+                    'pretix.giftcards.acceptance.added',
+                    data={'issuer': o.slug},
+                    user=request.user
+                )
+                messages.success(self.request, _('The selected gift card issuer has been added.'))
+        if "del" in request.POST:
+            o = Organizer.objects.filter(
+                slug=request.POST.get("del")
+            ).first()
+            if o:
+                self.request.organizer.gift_card_issuer_acceptance.filter(
+                    issuer=o
+                ).delete()
+                self.request.organizer.log_action(
+                    'pretix.giftcards.acceptance.removed',
+                    data={'issuer': o.slug},
+                    user=request.user
+                )
+                messages.success(self.request, _('The selected gift card issuer has been removed.'))
+        return redirect(reverse('control:organizer.giftcards', kwargs={'organizer': self.request.organizer.slug}))
+
+    def get_context_data(self, **kwargs):
+        ctx = super().get_context_data(**kwargs)
+        ctx['filter_form'] = self.filter_form
+        ctx['other_organizers'] = self.request.user.get_organizers_with_permission(
+            'can_manage_gift_cards', self.request
+        ).exclude(pk=self.request.organizer.pk)
+        return ctx
+
+    @cached_property
+    def filter_form(self):
+        return GiftCardFilterForm(data=self.request.GET, request=self.request)
+
+
+class GiftCardDetailView(OrganizerDetailViewMixin, OrganizerPermissionRequiredMixin, DetailView):
+    template_name = 'pretixcontrol/organizers/giftcard.html'
+    permission = 'can_manage_gift_cards'
+    context_object_name = 'card'
+
+    def get_object(self, queryset=None) -> Organizer:
+        return get_object_or_404(
+            self.request.organizer.issued_gift_cards,
+            pk=self.kwargs.get('giftcard')
+        )
+
+    @transaction.atomic()
+    def post(self, request, *args, **kwargs):
+        self.object = GiftCard.objects.select_for_update().get(pk=self.get_object().pk)
+        if 'value' in request.POST:
+            try:
+                value = DecimalField().to_python(request.POST.get('value'))
+            except ValidationError:
+                messages.error(request, _('Your input was invalid, please try again.'))
+            else:
+                if self.object.value + value < Decimal('0.00'):
+                    messages.error(request, _('Gift cards are not allowed to have negative values.'))
+                else:
+                    self.object.transactions.create(
+                        value=value
+                    )
+                    self.object.log_action(
+                        'pretix.giftcards.transaction.manual',
+                        data={
+                            'value': value
+                        },
+                        user=self.request.user,
+                    )
+                    messages.success(request, _('The manual transaction has been saved.'))
+                    return redirect(reverse(
+                        'control:organizer.giftcard',
+                        kwargs={
+                            'organizer': request.organizer.slug,
+                            'giftcard': self.object.pk
+                        }
+                    ))
+        return self.get(request, *args, **kwargs)
+
+
+class GiftCardCreateView(OrganizerDetailViewMixin, OrganizerPermissionRequiredMixin, CreateView):
+    template_name = 'pretixcontrol/organizers/giftcard_create.html'
+    permission = 'can_manage_gift_cards'
+    form_class = GiftCardCreateForm
+    success_url = 'invalid'
+
+    def get_form_kwargs(self):
+        kwargs = super().get_form_kwargs()
+        any_event = self.request.organizer.events.first()
+        kwargs['initial'] = {
+            'currency': any_event.currency if any_event else settings.DEFAULT_CURRENCY
+        }
+        kwargs['organizer'] = self.request.organizer
+        return kwargs
+
+    @transaction.atomic()
+    def post(self, request, *args, **kwargs):
+        return super().post(request, *args, **kwargs)
+
+    def form_valid(self, form):
+        messages.success(self.request, _('The gift card has been created and can now be used.'))
+        form.instance.issuer = self.request.organizer
+        super().form_valid(form)
+        form.instance.transactions.create(
+            value=form.cleaned_data['value']
+        )
+        form.instance.log_action('pretix.giftcards.transaction.manual', user=self.request.user, data={
+            'value': form.cleaned_data['value']
+        })
+        return redirect(reverse(
+            'control:organizer.giftcard',
+            kwargs={
+                'organizer': self.request.organizer.slug,
+                'giftcard': self.object.pk
+            }
+        ))

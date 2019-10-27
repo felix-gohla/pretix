@@ -7,11 +7,29 @@
     {% block inner %}
         <form class="form-horizontal" method="post" action="">
             {% csrf_token %}
+            {% bootstrap_field form.recipients layout='horizontal' %}
             {% bootstrap_field form.sendto layout='horizontal' %}
             {% if form.subevent %}
                 {% bootstrap_field form.subevent layout='horizontal' %}
             {% endif %}
             {% bootstrap_field form.items layout='horizontal' %}
+            <div class="row">
+                <div class="col-md-9 col-md-offset-3">
+                    <div class="panel-group">
+                        <div class="panel panel-default">
+                            <div class="panel-heading">
+                                <label data-toggle="collapse" data-target="#checkin_filter">
+                                    {{ form.filter_checkins }} {{ form.filter_checkins.label }}
+                                </label>
+                            </div>
+                            <div id="checkin_filter" class="panel-body panel-collapse collapse {% if form.filter_checkins.value %} in {% else %} out {% endif %}">
+                                {% bootstrap_field form.not_checked_in layout='horizontal' %}
+                                {% bootstrap_field form.checkin_lists layout='horizontal' %}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
             {% bootstrap_field form.subject layout='horizontal' %}
             {% bootstrap_field form.message layout='horizontal' %}
             {% if request.method == "POST" %}
@@ -20,7 +38,7 @@
                 <div class="tab-pane mail-preview-group">
                     {% for locale, out in output.items %}
                         <div lang="{{ locale }}" class="mail-preview">
-                            <strong>{{ out.subject }}</strong><br><br>
+                            <strong>{{ out.subject|safe }}</strong><br><br>
                             {{ out.html|safe }}
                         </div>
                     {% endfor %}

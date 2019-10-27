@@ -59,6 +59,7 @@ COPY src /pretix/src
 
 RUN cd /pretix/src && \
     export PYTHONPATH=$PYTHONPATH:/pretix/src &&\
+    pip3 install . &&\
     pip install -r requirements/plugins.txt
 
 RUN chmod +x /usr/local/bin/pretix && \

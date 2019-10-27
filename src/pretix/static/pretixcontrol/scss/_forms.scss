@@ -74,7 +74,11 @@ div[data-formset-body], div[data-formset-form], div[data-nested-formset-form], d
   margin-bottom: 0;
 }
 
-.preview-panel .nav-tabs {
+.tabbed-form > .tab-pane {
+  padding: 10px;
+}
+
+.nav-tabs {
   border-bottom: 0px solid #ddd;
 }
 
@@ -137,6 +141,10 @@ div.mail-preview {
   border: 1px solid #ccc;
   border-top-width: 1px;
   border-radius: 3px;
+
+  .placeholder {
+    background: transparentize($brand-warning, 0.6);
+  }
 }
 
 .mail-preview-group div[lang] {
@@ -215,6 +223,23 @@ div.mail-preview {
 }
 input[type=number].short {
   width: 80px !important;
+}
+.geodata-group {
+  .form-group {
+    margin: 0 0 10px 0;
+  }
+  .attrib {
+    padding: 0;
+    margin: 0;
+    font-size: $font-size-small;
+    a {
+      color: $text-muted;
+    }
+  }
+  .leaflet-container {
+    height: 200px;
+    margin: 0;
+  }
 }
 .metadata-group {
   .form-group {
@@ -309,6 +334,9 @@ div.scrolling-multiple-choice, div.scrolling-choice {
 
   .radio:first-of-type, .checkbox:first-of-type {
     margin-top: 0;
+  }
+  &.scrolling-multiple-choice-large {
+    height: 350px;
   }
 }
 table td > .checkbox {
@@ -407,14 +435,20 @@ table td > .checkbox input[type="checkbox"] {
   }
 }
 
+.form-order-change {
+  .row {
+    padding: 5px 0;
+  }
+}
+
 @media(max-width: $screen-xs-max) {
   .nameparts-form-group {
     display: block;
-    input:not(:first-child) {
+    input:not(:first-child), select:not(:first-child) {
       border-top-right-radius: 0;
       border-top-left-radius: 0;
     }
-    input:not(:last-child) {
+    input:not(:last-child), select:not(:last-child) {
       border-bottom-right-radius: 0;
       border-bottom-left-radius: 0;
     }
@@ -424,34 +458,38 @@ table td > .checkbox input[type="checkbox"] {
   .nameparts-form-group {
     display: flex;
     flex-direction: row;
-    input {
+    input, select {
       width: auto;
       flex-basis: 0;
       flex-grow: 1;
     }
-    input:not(:first-child) {
+    input:not(:first-child), select:not(:first-child) {
       border-bottom-left-radius: 0;
       border-top-left-radius: 0;
     }
-    input:not(:last-child) {
+    input:not(:last-child), select:not(:last-child) {
       border-bottom-right-radius: 0;
       border-top-right-radius: 0;
     }
-    input[data-size="1"] {
+    [data-size="1"] {
       flex-grow: 1;
       flex-shrink: 4;
     }
-    input[data-size="2"] {
+    [data-size="2"] {
       flex-grow: 2;
       flex-shrink: 3;
     }
-    input[data-size="3"] {
+    [data-size="3"] {
       flex-grow: 3;
       flex-shrink: 2;
     }
-    input[data-size="4"] {
+    [data-size="4"] {
       flex-grow: 4;
       flex-shrink: 1;
     }
   }
+}
+
+.help-inline {
+  color: lighten($text-color, 25%); // lighten the text some for contrast
 }

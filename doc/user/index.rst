@@ -10,6 +10,8 @@ wanting to use pretix to sell tickets.
    organizers/index
    events/create
    events/settings
+   events/structureguide
    events/widget
+   events/giftcards
    faq
    markdown

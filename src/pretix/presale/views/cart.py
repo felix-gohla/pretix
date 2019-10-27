@@ -17,6 +17,7 @@ from django.utils.timezone import now
 from django.utils.translation import ugettext as _
 from django.views.decorators.clickjacking import xframe_options_exempt
 from django.views.generic import TemplateView, View
+from django_scopes import scopes_disabled
 
 from pretix.base.models import (
     CartPosition, InvoiceAddress, QuestionAnswer, SubEvent, Voucher,
@@ -80,7 +81,8 @@ class CartActionMixin:
             return InvoiceAddress()
 
         try:
-            return InvoiceAddress.objects.get(pk=iapk, order__isnull=True)
+            with scopes_disabled():
+                return InvoiceAddress.objects.get(pk=iapk, order__isnull=True)
         except InvoiceAddress.DoesNotExist:
             return InvoiceAddress()
 
@@ -88,10 +90,26 @@ class CartActionMixin:
         if value.strip() == '' or '_' not in key:
             return
 
-        if not key.startswith('item_') and not key.startswith('variation_'):
+        if not key.startswith('item_') and not key.startswith('variation_') and not key.startswith('seat_'):
             return
 
         parts = key.split("_")
+        price = self.request.POST.get('price_' + "_".join(parts[1:]), "")
+
+        if key.startswith('seat_'):
+            try:
+                return {
+                    'item': int(parts[1]),
+                    'variation': int(parts[2]) if len(parts) > 2 else None,
+                    'count': 1,
+                    'seat': value,
+                    'price': price,
+                    'voucher': voucher,
+                    'subevent': self.request.POST.get("subevent")
+                }
+            except ValueError:
+                raise CartError(_('Please enter numbers only.'))
+
         try:
             amount = int(value)
         except ValueError:
@@ -101,7 +119,6 @@ class CartActionMixin:
         elif amount == 0:
             return
 
-        price = self.request.POST.get('price_' + "_".join(parts[1:]), "")
         if key.startswith('item_'):
             try:
                 return {
@@ -129,8 +146,7 @@ class CartActionMixin:
 
     def _items_from_post_data(self):
         """
-        Parses the POST data and returns a list of tuples in the
-        form (item id, variation id or None, number)
+        Parses the POST data and returns a list of dictionaries
         """
 
         # Compatibility patch that makes the frontend code a lot easier
@@ -158,6 +174,7 @@ class CartActionMixin:
         return items
 
 
+@scopes_disabled()
 def generate_cart_id(request=None, prefix=''):
     """
     Generates a random new cart ID that is not currently in use, with an optional pretix.
@@ -369,6 +386,8 @@ class CartAdd(EventViewMixin, CartActionMixin, AsyncAction, View):
         if "widget_data" in request.POST:
             try:
                 widget_data = json.loads(request.POST.get("widget_data", "{}"))
+                if not isinstance(widget_data, dict):
+                    widget_data = {}
             except ValueError:
                 widget_data = {}
             else:
@@ -382,7 +401,7 @@ class CartAdd(EventViewMixin, CartActionMixin, AsyncAction, View):
         items = self._items_from_post_data()
         if items:
             return self.do(self.request.event.id, items, cart_id, translation.get_language(),
-                           self.invoice_address.pk, widget_data, self.request.sales_channel)
+                           self.invoice_address.pk, widget_data, self.request.sales_channel.identifier)
         else:
             if 'ajax' in self.request.GET or 'ajax' in self.request.POST:
                 return JsonResponse({
@@ -405,7 +424,7 @@ class RedeemView(NoSearchIndexViewMixin, EventViewMixin, TemplateView):
 
         # Fetch all items
         items, display_add_to_cart = get_grouped_items(self.request.event, self.subevent,
-                                                       voucher=self.voucher, channel=self.request.sales_channel)
+                                                       voucher=self.voucher, channel=self.request.sales_channel.identifier)
 
         # Calculate how many options the user still has. If there is only one option, we can
         # check the box right away ;)
@@ -422,6 +441,15 @@ class RedeemView(NoSearchIndexViewMixin, EventViewMixin, TemplateView):
             settings.SESSION_COOKIE_NAME not in self.request.COOKIES
             # Cookies are not supported! Lets just make the form open in a new tab
         )
+
+        if self.request.event.settings.redirect_to_checkout_directly:
+            context['cart_redirect'] = eventreverse(self.request.event, 'presale:event.checkout.start',
+                                                    kwargs={'cart_namespace': kwargs.get('cart_namespace') or ''})
+        else:
+            context['cart_redirect'] = eventreverse(self.request.event, 'presale:event.index',
+                                                    kwargs={'cart_namespace': kwargs.get('cart_namespace') or ''})
+        if context['cart_redirect'].startswith('https:'):
+            context['cart_redirect'] = '/' + context['cart_redirect'].split('/', 3)[3]
 
         return context
 
@@ -450,7 +478,10 @@ class RedeemView(NoSearchIndexViewMixin, EventViewMixin, TemplateView):
                 if v_avail < 1 and not err:
                     err = error_messages['voucher_redeemed_cart'] % self.request.event.settings.reservation_time
             except Voucher.DoesNotExist:
-                err = error_messages['voucher_invalid']
+                if self.request.event.organizer.accepted_gift_cards.filter(secret__iexact=request.GET.get("voucher")).exists():
+                    err = error_messages['gift_card']
+                else:
+                    err = error_messages['voucher_invalid']
         else:
             return redirect(self.get_index_url())
 

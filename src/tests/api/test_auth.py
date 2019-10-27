@@ -13,7 +13,6 @@ def test_no_auth(client):
 def test_session_auth_no_teams(client, user):
     client.login(email=user.email, password='dummy')
     resp = client.get('/api/v1/organizers/')
-    print(resp.data)
     assert resp.status_code == 200
     assert len(resp.data['results']) == 0
 
@@ -72,7 +71,8 @@ def test_device_auth_valid(client, device):
 @pytest.mark.django_db
 def test_device_auth_revoked(client, device):
     client.credentials(HTTP_AUTHORIZATION='Device ' + device.api_token)
-    device.api_token = None
+    device.revoked = True
     device.save()
     resp = client.get('/api/v1/organizers/')
     assert resp.status_code == 401
+    assert str(resp.data['detail']) == "Device access has been revoked."

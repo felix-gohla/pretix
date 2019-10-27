@@ -10,8 +10,8 @@ from django.utils.translation import pgettext_lazy, ugettext_lazy as _
 
 from pretix.base.forms.widgets import DatePickerWidget
 from pretix.base.models import (
-    Checkin, Event, Invoice, Item, Order, OrderPayment, OrderPosition,
-    OrderRefund, Organizer, Question, QuestionAnswer, SubEvent,
+    Checkin, Event, EventMetaValue, Invoice, Item, Order, OrderPayment,
+    OrderPosition, OrderRefund, Organizer, Question, QuestionAnswer, SubEvent,
 )
 from pretix.base.signals import register_payment_providers
 from pretix.control.forms.widgets import Select2
@@ -132,7 +132,7 @@ class OrderFilterForm(FilterForm):
             matching_positions = OrderPosition.objects.filter(
                 Q(order=OuterRef('pk')) & Q(
                     Q(attendee_name_cached__icontains=u) | Q(attendee_email__icontains=u)
-                    | Q(secret__istartswith=u)
+                    | Q(secret__istartswith=u) | Q(voucher__code__icontains=u)
                 )
             ).values('id')
 
@@ -177,11 +177,9 @@ class EventOrderFilterForm(OrderFilterForm):
     orders = {'code': 'code', 'email': 'email', 'total': 'total',
               'datetime': 'datetime', 'status': 'status'}
 
-    item = forms.ModelChoiceField(
+    item = forms.ChoiceField(
         label=_('Products'),
-        queryset=Item.objects.none(),
         required=False,
-        empty_label=_('All products')
     )
     subevent = forms.ModelChoiceField(
         label=pgettext_lazy('subevent', 'Date'),
@@ -241,12 +239,28 @@ class EventOrderFilterForm(OrderFilterForm):
         elif 'subevent':
             del self.fields['subevent']
 
+        choices = [('', _('All products'))]
+        for i in self.event.items.prefetch_related('variations').all():
+            variations = list(i.variations.all())
+            if variations:
+                choices.append((str(i.pk), _('{product} – Any variation').format(product=i.name)))
+                for v in variations:
+                    choices.append(('%d-%d' % (i.pk, v.pk), '%s – %s' % (i.name, v.value)))
+            else:
+                choices.append((str(i.pk), i.name))
+        self.fields['item'].choices = choices
+
     def filter_qs(self, qs):
         fdata = self.cleaned_data
         qs = super().filter_qs(qs)
 
-        if fdata.get('item'):
-            qs = qs.filter(all_positions__item=fdata.get('item'), all_positions__canceled=False).distinct()
+        item = fdata.get('item')
+        if item:
+            if '-' in item:
+                var = item.split('-')[1]
+                qs = qs.filter(all_positions__variation_id=var, all_positions__canceled=False).distinct()
+            else:
+                qs = qs.filter(all_positions__item_id=fdata.get('item'), all_positions__canceled=False).distinct()
 
         if fdata.get('subevent'):
             qs = qs.filter(all_positions__subevent=fdata.get('subevent'), all_positions__canceled=False).distinct()
@@ -488,6 +502,29 @@ class OrganizerFilterForm(FilterForm):
         return qs
 
 
+class GiftCardFilterForm(FilterForm):
+    query = forms.CharField(
+        label=_('Search query'),
+        widget=forms.TextInput(attrs={
+            'placeholder': _('Search query'),
+            'autofocus': 'autofocus'
+        }),
+        required=False
+    )
+
+    def __init__(self, *args, **kwargs):
+        kwargs.pop('request')
+        super().__init__(*args, **kwargs)
+
+    def filter_qs(self, qs):
+        fdata = self.cleaned_data
+
+        if fdata.get('query'):
+            query = fdata.get('query')
+            qs = qs.filter(secret__icontains=query)
+        return qs
+
+
 class EventFilterForm(FilterForm):
     orders = {
         'slug': 'slug',
@@ -536,13 +573,21 @@ class EventFilterForm(FilterForm):
 
     def __init__(self, *args, **kwargs):
         request = kwargs.pop('request')
+        self.organizer = kwargs.pop('organizer', None)
         super().__init__(*args, **kwargs)
-        if request.user.has_active_staff_session(request.session.session_key):
-            self.fields['organizer'].queryset = Organizer.objects.all()
+        if self.organizer:
+            del self.fields['organizer']
+            for p in self.organizer.meta_properties.all():
+                self.fields['meta_{}'.format(p.name)] = forms.CharField(
+                    label=p.name, required=False
+                )
         else:
-            self.fields['organizer'].queryset = Organizer.objects.filter(
-                pk__in=request.user.teams.values_list('organizer', flat=True)
-            )
+            if request.user.has_active_staff_session(request.session.session_key):
+                self.fields['organizer'].queryset = Organizer.objects.all()
+            else:
+                self.fields['organizer'].queryset = Organizer.objects.filter(
+                    pk__in=request.user.teams.values_list('organizer', flat=True)
+                )
 
     def filter_qs(self, qs):
         fdata = self.cleaned_data
@@ -590,6 +635,26 @@ class EventFilterForm(FilterForm):
             qs = qs.filter(
                 Q(name__icontains=i18ncomp(query)) | Q(slug__icontains=query)
             )
+
+        if self.organizer:
+            for i, p in enumerate(self.organizer.meta_properties.all()):
+                d = fdata.get('meta_{}'.format(p.name))
+                if d:
+                    emv_with_value = EventMetaValue.objects.filter(
+                        event=OuterRef('pk'),
+                        property__name=p.name,
+                        value=d
+                    )
+                    emv_with_any_value = EventMetaValue.objects.filter(
+                        event=OuterRef('pk'),
+                        property__name=p.name,
+                    )
+                    qs = qs.annotate(**{'attr_{}'.format(i): Exists(emv_with_value)})
+                    filters = Q(**{'attr_{}'.format(i): True})
+                    if p.default == d:
+                        qs = qs.annotate(**{'attr_{}_any'.format(i): Exists(emv_with_any_value)})
+                        filters |= Q(**{'attr_{}_any'.format(i): False})
+                    qs = qs.filter(filters)
 
         if fdata.get('ordering'):
             qs = qs.order_by(self.get_order_by())
@@ -888,6 +953,43 @@ class VoucherFilterForm(FilterForm):
         return qs
 
 
+class VoucherTagFilterForm(FilterForm):
+    subevent = forms.ModelChoiceField(
+        label=pgettext_lazy('subevent', 'Date'),
+        queryset=SubEvent.objects.none(),
+        required=False,
+        empty_label=pgettext_lazy('subevent', 'All dates')
+    )
+
+    def __init__(self, *args, **kwargs):
+        self.event = kwargs.pop('event')
+        super().__init__(*args, **kwargs)
+
+        if self.event.has_subevents:
+            self.fields['subevent'].queryset = self.event.subevents.all()
+            self.fields['subevent'].widget = Select2(
+                attrs={
+                    'data-model-select2': 'event',
+                    'data-select2-url': reverse('control:event.subevents.select2', kwargs={
+                        'event': self.event.slug,
+                        'organizer': self.event.organizer.slug,
+                    }),
+                    'data-placeholder': pgettext_lazy('subevent', 'All dates')
+                }
+            )
+            self.fields['subevent'].widget.choices = self.fields['subevent'].choices
+        elif 'subevent':
+            del self.fields['subevent']
+
+    def filter_qs(self, qs):
+        fdata = self.cleaned_data
+
+        if fdata.get('subevent'):
+            qs = qs.filter(subevent_id=fdata.get('subevent').pk)
+
+        return qs
+
+
 class RefundFilterForm(FilterForm):
     provider = forms.ChoiceField(
         label=_('Payment provider'),
@@ -926,3 +1028,51 @@ class RefundFilterForm(FilterForm):
                                       OrderRefund.REFUND_STATE_EXTERNAL])
 
         return qs
+
+
+class OverviewFilterForm(FilterForm):
+    subevent = forms.ModelChoiceField(
+        label=pgettext_lazy('subevent', 'Date'),
+        queryset=SubEvent.objects.none(),
+        required=False,
+        empty_label=pgettext_lazy('subevent', 'All dates')
+    )
+    date_axis = forms.ChoiceField(
+        label=_('Date filter'),
+        choices=(
+            ('', _('Filter by…')),
+            ('order_date', _('Order date')),
+            ('last_payment_date', _('Date of last successful payment')),
+        ),
+        required=False,
+    )
+    date_from = forms.DateField(
+        label=_('Date from'),
+        required=False,
+        widget=DatePickerWidget,
+    )
+    date_until = forms.DateField(
+        label=_('Date until'),
+        required=False,
+        widget=DatePickerWidget,
+    )
+
+    def __init__(self, *args, **kwargs):
+        self.event = kwargs.pop('event')
+        super().__init__(*args, **kwargs)
+
+        if self.event.has_subevents:
+            self.fields['subevent'].queryset = self.event.subevents.all()
+            self.fields['subevent'].widget = Select2(
+                attrs={
+                    'data-model-select2': 'event',
+                    'data-select2-url': reverse('control:event.subevents.select2', kwargs={
+                        'event': self.event.slug,
+                        'organizer': self.event.organizer.slug,
+                    }),
+                    'data-placeholder': pgettext_lazy('subevent', 'All dates')
+                }
+            )
+            self.fields['subevent'].widget.choices = self.fields['subevent'].choices
+        elif 'subevent':
+            del self.fields['subevent']

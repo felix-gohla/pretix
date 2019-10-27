@@ -19,7 +19,7 @@
         {% if order.testmode %}
             <span class="label label-warning">{% trans "TEST MODE" %}</span>
         {% endif %}
-        {% include "pretixcontrol/orders/fragment_order_status.html" with order=order class="pull-right" %}
+        {% include "pretixcontrol/orders/fragment_order_status.html" with order=order class="pull-right flip" %}
     </h1>
     {% if 'can_change_orders' in request.eventpermset %}
         <form action="{% url "control:event.order.transition" event=request.event.slug organizer=request.event.organizer.slug code=order.code %}"
@@ -78,7 +78,7 @@
                 method="post">
             {% csrf_token %}
             <div class="alert alert-info">
-                <button name="status" value="e" class="btn btn-default pull-right">{% trans "Expire order" %}</button>
+                <button name="status" value="e" class="btn btn-default pull-right flip">{% trans "Expire order" %}</button>
                 {% trans "The payment for this order is overdue, but you have configured not to expire orders automatically. To free quota capacity, you can mark it as expired manually." %}
                 <div class="clearfix"></div>
             </div>
@@ -118,7 +118,7 @@
                         <dt>{% trans "Order code" %}</dt>
                         <dd>{{ order.code }}</dd>
                         <dt>{% trans "Order date" %}</dt>
-                        <dd>{{ order.datetime }}</dd>
+                        <dd>{{ order.datetime|date:"SHORT_DATETIME_FORMAT" }}</dd>
                         {% if sales_channel %}
                             <dt>{% trans "Sales channel" %}</dt>
                             <dd>{{ sales_channel.verbose_name }}</dd>
@@ -132,11 +132,14 @@
                         </dd>
                         {% if order.status == "n" %}
                             <dt>{% trans "Expiry date" %}</dt>
-                            <dd>{{ order.expires }}</dd>
+                            <dd>{{ order.expires|date:"SHORT_DATETIME_FORMAT" }}</dd>
                         {% endif %}
                         <dt>{% trans "User" %}</dt>
                         <dd>
-                            {{ order.email|default_if_none:"" }}&nbsp;&nbsp;
+                            {{ order.email|default_if_none:"" }}
+                            {% if order.email and order.email_known_to_work %}
+                                <span class="fa fa-check-circle text-success" data-toggle="tooltip" title="{% trans "We know that this email address works because the user clicked a link we sent them." %}"></span>
+                            {% endif %}&nbsp;&nbsp;
                             <a href="{% url "control:event.order.contact" event=request.event.slug organizer=request.event.organizer.slug code=order.code %}" class="btn btn-default btn-xs">
                                 <span class="fa fa-edit"></span>
                             </a>
@@ -221,7 +224,7 @@
             </div>
             <div class="panel panel-default items">
                 <div class="panel-heading">
-                    <div class="pull-right">
+                    <div class="pull-right flip">
                         {% if order.changable and 'can_change_orders' in request.eventpermset %}
                             <a href="{% url "control:event.order.info" event=request.event.slug organizer=request.event.organizer.slug code=order.code %}">
                                 <span class="fa fa-edit"></span>
@@ -252,8 +255,21 @@
                                 {% endif %}
                                 {% if line.checkins.all %}
                                     {% for c in line.checkins.all %}
-                                        <span class="fa fa-fw fa-check" data-toggle="tooltip_html" title="{{ c.list.name }}<br>{% blocktrans trimmed with date=c.datetime|date:'SHORT_DATETIME_FORMAT' %}First scanned: {{ date }}{% endblocktrans %}"></span>
+                                        {% if c.auto_checked_in %}
+                                            <span class="fa fa-fw fa-magic" data-toggle="tooltip_html" title="{{ c.list.name }}<br>{% blocktrans trimmed with date=c.datetime|date:'SHORT_DATETIME_FORMAT' %}Automatically checked in: {{ date }}{% endblocktrans %}"></span>
+                                        {% else %}
+                                            <span class="fa fa-fw fa-check" data-toggle="tooltip_html" title="{{ c.list.name }}<br>{% blocktrans trimmed with date=c.datetime|date:'SHORT_DATETIME_FORMAT' %}First scanned: {{ date }}{% endblocktrans %}"></span>
+                                        {% endif %}
                                     {% endfor %}
+                                {% endif %}
+                                {% if line.seat %}
+                                    <br />
+                                    <svg xmlns="http://www.w3.org/2000/svg" width="18" height="14" viewBox="0 0 4.7624999 3.7041668" class="svg-icon">
+                                        <path
+                                                style="fill:black"
+                                                d="m 1.9592032,1.8522629e-4 c -0.21468,0 -0.38861,0.17394000371 -0.38861,0.38861000371 0,0.21466 0.17393,0.38861 0.38861,0.38861 0.21468,0 0.3886001,-0.17395 0.3886001,-0.38861 0,-0.21467 -0.1739201,-0.38861000371 -0.3886001,-0.38861000371 z m 0.1049,0.84543000371 c -0.20823,-0.0326 -0.44367,0.12499 -0.39998,0.40462997 l 0.20361,1.01854 c 0.0306,0.15316 0.15301,0.28732 0.3483,0.28732 h 0.8376701 v 0.92708 c 0,0.29313 0.41187,0.29447 0.41187,0.005 v -1.19115 c 0,-0.14168 -0.0995,-0.29507 -0.29094,-0.29507 l -0.65578,-10e-4 -0.1757,-0.87644 C 2.3042533,0.95300523 2.1890432,0.86500523 2.0641032,0.84547523 Z m -0.58549,0.44906997 c -0.0946,-0.0134 -0.20202,0.0625 -0.17829,0.19172 l 0.18759,0.91054 c 0.0763,0.33956 0.36802,0.55914 0.66042,0.55914 h 0.6015201 c 0.21356,0 0.21448,-0.32143 -0.003,-0.32143 H 2.1954632 c -0.19911,0 -0.36364,-0.11898 -0.41341,-0.34107 l -0.17777,-0.87126 c -0.0165,-0.0794 -0.0688,-0.11963 -0.12557,-0.12764 z"/>
+                                    </svg>
+                                    {{ line.seat }}
                                 {% endif %}
                                 {% if line.voucher %}
                                     <br/><span class="fa fa-tags"></span> {% trans "Voucher code used:" %}
@@ -271,7 +287,7 @@
                                             {% for b in download_buttons %}
                                                 <form action="{% url "control:event.order.download.ticket" code=order.code event=request.event.slug organizer=request.event.organizer.slug position=line.pk output=b.identifier %}"
                                                         method="post" data-asynctask data-asynctask-download
-                                                        class="form-inline helper-display-inline">
+                                                        class="form-inline helper-display-inline{% if b.javascript_required %} requirejs{% endif %}">
                                                     {% csrf_token %}
                                                     <button type="submit"
                                                             class="btn btn-xs btn-default">
@@ -282,10 +298,25 @@
                                         {% endif %}
                                         <button type="submit" data-toggle="qrcode" data-qrcode="{{ line.secret }}"
                                                 class="btn btn-xs btn-default">
-                                            <span class="fa fa-qrcode"></span> {% trans "Show ticket code" %}
+                                            <span class="fa fa-qrcode"></span> {% trans "Ticket code" %}
                                         </button>
+                                        {% if not line.addon_to %}
+                                            <a href="{% eventurl request.event "presale:event.order.position" order=order.code secret=line.web_secret position=line.positionid %}"
+                                                    class="btn btn-xs btn-default" target="_blank">
+                                                <span class="fa fa-eye"></span>
+                                                {% trans "Ticket page" %}
+                                            </a>
+                                        {% endif %}
                                         {% eventsignal event "pretix.control.signals.order_position_buttons" order=order position=line request=request %}
                                     </div>
+                                {% endif %}
+                                {% if line.issued_gift_cards %}
+                                    <dl>
+                                        {% for gc in line.issued_gift_cards.all %}
+                                            <dt>{% trans "Gift card code" %}</dt>
+                                            <dd><a href="{% url "control:organizer.giftcard" organizer=gc.issuer.slug giftcard=gc.pk %}">{{ gc.secret }}</a></dd>
+                                        {% endfor %}
+                                    </dl>
                                 {% endif %}
                                 {% if line.has_questions %}
                                     <dl>
@@ -296,8 +327,22 @@
                                         {% endif %}
                                         {% if line.item.admission and event.settings.attendee_emails_asked %}
                                             <dt>{% trans "Attendee email" %}</dt>
-                                            <dd>{% if line.attendee_email %}{{ line.attendee_email }}{% else %}
-                                                <em>{% trans "not answered" %}</em>{% endif %}</dd>
+                                            <dd>
+                                                {% if line.attendee_email %}
+                                                    {{ line.attendee_email }}
+                                                    {% if not line.addon_to %}
+                                                        <form class="form-inline helper-display-inline" method="post"
+                                                                action="{% url "control:event.order.resendlink" event=request.event.slug organizer=request.event.organizer.slug code=order.code position=line.pk %}">
+                                                            {% csrf_token %}
+                                                            <button class="btn btn-default btn-xs">
+                                                                {% trans "Resend link" %}
+                                                            </button>
+                                                        </form>
+                                                    {% endif %}
+                                                {% else %}
+                                                    <em>{% trans "not answered" %}</em>
+                                                {% endif %}
+                                            </dd>
                                         {% endif %}
                                         {% for q in line.questions %}
                                             <dt>
@@ -320,6 +365,13 @@
                                                                 title="{% trans "This file has been uploaded by a user and could contain viruses or other malicious content." %}">
                                                             {% trans "UNSAFE" %}
                                                         </span>
+                                                        {% if q.answer.is_image %}
+                                                            <br>
+                                                            <a href="{{ q.answer.backend_file_url }}?token={% answer_token request q.answer %}" data-lightbox="order"
+                                                                class="answer-thumb">
+                                                                <img src="{{ q.answer.backend_file_url }}?token={% answer_token request q.answer %}">
+                                                            </a>
+                                                        {% endif %}
                                                     {% else %}
                                                         {{ q.answer|linebreaksbr }}
                                                     {% endif %}
@@ -446,7 +498,7 @@
                                         <th>{% trans "Confirmation date" %}</th>
                                         <th>{% trans "Payment method" %}</th>
                                         <th>{% trans "Status" %}</th>
-                                        <th class="text-right">{% trans "Amount" %}</th>
+                                        <th class="text-right flip">{% trans "Amount" %}</th>
                                     </tr>
                                     </thead>
                                     <tbody>
@@ -484,12 +536,32 @@
                                                     {{ p.get_state_display }}
                                                 </span>
                                             </td>
-                                            <td class="text-right">{{ p.amount|money:request.event.currency }}</td>
+                                            <td class="text-right flip">{{ p.amount|money:request.event.currency }}</td>
                                         </tr>
                                         {% if p.html_info %}
                                             <tr>
                                                 <td colspan="1"></td>
-                                                <td colspan="5">{{ p.html_info|safe }}</td>
+                                                <td colspan="5">
+                                                    {{ p.html_info|safe }}
+                                                    {% if staff_session %}
+                                                        <p>
+                                                            <a href="" class="btn btn-default btn-xs" data-expandpayment data-id="{{ p.pk }}">
+                                                                <span class="fa-eye fa fa-fw"></span>
+                                                                {% trans "Inspect" %}
+                                                            </a>
+                                                        </p>
+                                                    {% endif %}
+                                                </td>
+                                            </tr>
+                                        {% elif staff_session %}
+                                            <tr>
+                                                <td colspan="1"></td>
+                                                <td colspan="5">
+                                                    <a href="" class="btn btn-default btn-xs" data-expandpayment data-id="{{ p.pk }}">
+                                                        <span class="fa-eye fa fa-fw"></span>
+                                                        {% trans "Inspect" %}
+                                                    </a>
+                                                </td>
                                             </tr>
                                         {% endif %}
                                     {% endfor %}
@@ -522,8 +594,8 @@
                                             <th>{% trans "Payment method" %}</th>
                                             <th>{% trans "Payment" %}</th>
                                             <th>{% trans "Status" %}</th>
-                                            <th class="text-right">{% trans "Amount" %}</th>
-                                            <th class="text-right"></th>
+                                            <th class="text-right flip">{% trans "Amount" %}</th>
+                                            <th class="text-right flip"></th>
                                         </tr>
                                         </thead>
                                         <tbody>
@@ -546,8 +618,8 @@
                                                     {{ r.get_state_display }}
                                                 </span>
                                                 </td>
-                                                <td class="text-right">{{ r.amount|money:request.event.currency }}</td>
-                                                <td class="text-right">
+                                                <td class="text-right flip">{{ r.amount|money:request.event.currency }}</td>
+                                                <td class="text-right flip">
                                                     {% if r.state == "transit" or r.state == "created" %}
                                                         <a href="{% url "control:event.order.refunds.cancel" event=request.event.slug organizer=request.event.organizer.slug code=order.code refund=r.pk %}"
                                                                 class="btn btn-danger btn-xs" data-toggle="tooltip"
@@ -574,6 +646,18 @@
                                                     {% endif %}
                                                 </td>
                                             </tr>
+                                            {% if staff_session %}
+                                                <tr>
+                                                    <td colspan="1"></td>
+                                                    <td colspan="7">
+                                                        <a href="" class="btn btn-default btn-xs" data-expandrefund
+                                                                data-id="{{ r.pk }}">
+                                                            <span class="fa-eye fa fa-fw"></span>
+                                                            {% trans "Inspect" %}
+                                                        </a>
+                                                    </td>
+                                                </tr>
+                                            {% endif %}
                                         {% endfor %}
                                         </tbody>
                                     </table>
@@ -588,7 +672,7 @@
                     <div class="col-md-6">
                         <div class="panel panel-default">
                             <div class="panel-heading">
-                                <div class="pull-right">
+                                <div class="pull-right flip">
                                     {% if order.changable and 'can_change_orders' in request.eventpermset %}
                                         <a href="{% url "control:event.order.info" event=request.event.slug organizer=request.event.organizer.slug code=order.code %}">
                                             <span class="fa fa-edit"></span>
@@ -612,6 +696,10 @@
                                     <dd>{{ order.invoice_address.zipcode }} {{ order.invoice_address.city }}</dd>
                                     <dt>{% trans "Country" %}</dt>
                                     <dd>{{ order.invoice_address.country.name|default:order.invoice_address.country_old }}</dd>
+                                    {% if order.invoice_address.state %}
+                                        <dt>{% trans "State" context "address" %}</dt>
+                                        <dd>{{ order.invoice_address.state_name }}</dd>
+                                    {% endif %}
                                     {% if request.event.settings.invoice_address_vatid %}
                                         <dt>{% trans "VAT ID" %}</dt>
                                         <dd>

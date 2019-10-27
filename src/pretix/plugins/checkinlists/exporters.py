@@ -3,7 +3,7 @@ from collections import OrderedDict
 import dateutil.parser
 from django import forms
 from django.conf import settings
-from django.db.models import Max, OuterRef, Subquery
+from django.db.models import Exists, Max, OuterRef, Subquery
 from django.db.models.functions import Coalesce
 from django.urls import reverse
 from django.utils.formats import date_format
@@ -93,10 +93,14 @@ class CheckInListMixin(BaseExporter):
         ).order_by().values('position_id').annotate(
             m=Max('datetime')
         ).values('m')
+
         qs = OrderPosition.objects.filter(
             order__event=self.event,
         ).annotate(
-            last_checked_in=Subquery(cqs)
+            last_checked_in=Subquery(cqs),
+            auto_checked_in=Exists(
+                Checkin.objects.filter(position_id=OuterRef('pk'), list_id=cl.pk, auto_checked_in=True)
+            )
         ).prefetch_related(
             'answers', 'answers__question', 'addon_to__answers', 'addon_to__answers__question'
         ).select_related('order', 'item', 'variation', 'addon_to', 'order__invoice_address', 'voucher')
@@ -196,7 +200,7 @@ class PDFCheckinList(ReportlabExportMixin, CheckInListMixin, BaseExporter):
 
         story = [
             Paragraph(
-                '{} – {}'.format(cl.name, (cl.subevent or self.event).get_date_from_display()),
+                cl.name,
                 headlinestyle
             ),
             Spacer(1, 5 * mm)
@@ -239,7 +243,7 @@ class PDFCheckinList(ReportlabExportMixin, CheckInListMixin, BaseExporter):
                 name += "<br/>" + iac
 
             row = [
-                '!!' if op.item.checkin_attention else '',
+                '!!' if op.item.checkin_attention or op.order.checkin_attention else '',
                 CBFlowable(bool(op.last_checked_in)),
                 '✘' if op.order.status != Order.STATUS_PAID else '✔',
                 op.order.code,
@@ -250,9 +254,19 @@ class PDFCheckinList(ReportlabExportMixin, CheckInListMixin, BaseExporter):
             acache = {}
             if op.addon_to:
                 for a in op.addon_to.answers.all():
-                    acache[a.question_id] = str(a)
+                    # We do not want to localize Date, Time and Datetime question answers, as those can lead
+                    # to difficulties parsing the data (for example 2019-02-01 may become Février, 2019 01 in French).
+                    if a.question.type in Question.UNLOCALIZED_TYPES:
+                        acache[a.question_id] = a.answer
+                    else:
+                        acache[a.question_id] = str(a)
             for a in op.answers.all():
-                acache[a.question_id] = str(a)
+                # We do not want to localize Date, Time and Datetime question answers, as those can lead
+                # to difficulties parsing the data (for example 2019-02-01 may become Février, 2019 01 in French).
+                if a.question.type in Question.UNLOCALIZED_TYPES:
+                    acache[a.question_id] = a.answer
+                else:
+                    acache[a.question_id] = str(a)
             for q in questions:
                 txt = acache.get(q.pk, '')
                 p = Paragraph(txt, self.get_style())
@@ -299,7 +313,7 @@ class CSVCheckinList(CheckInListMixin, ListExporter):
             for k, label, w in name_scheme['fields']:
                 headers.append(_('Attendee name: {part}').format(part=label))
         headers += [
-            _('Product'), _('Price'), _('Checked in')
+            _('Product'), _('Price'), _('Checked in'), _('Automatically checked in')
         ]
         if not cl.include_pending:
             qs = qs.filter(order__status=Order.STATUS_PAID)
@@ -321,6 +335,8 @@ class CSVCheckinList(CheckInListMixin, ListExporter):
         headers.append(_('Company'))
         headers.append(_('Voucher code'))
         headers.append(_('Order date'))
+        headers.append(_('Requires special attention'))
+        headers.append(_('Comment'))
         yield headers
 
         for op in qs:
@@ -353,7 +369,8 @@ class CSVCheckinList(CheckInListMixin, ListExporter):
                 str(op.item) + (" – " + str(op.variation.value) if op.variation else ""),
                 op.price,
                 date_format(last_checked_in.astimezone(self.event.timezone), 'SHORT_DATETIME_FORMAT')
-                if last_checked_in else ''
+                if last_checked_in else '',
+                _('Yes') if op.auto_checked_in else _('No'),
             ]
             if cl.include_pending:
                 row.append(_('Yes') if op.order.status == Order.STATUS_PAID else _('No'))
@@ -365,15 +382,27 @@ class CSVCheckinList(CheckInListMixin, ListExporter):
             acache = {}
             if op.addon_to:
                 for a in op.addon_to.answers.all():
-                    acache[a.question_id] = str(a)
+                    # We do not want to localize Date, Time and Datetime question answers, as those can lead
+                    # to difficulties parsing the data (for example 2019-02-01 may become Février, 2019 01 in French).
+                    if a.question.type in Question.UNLOCALIZED_TYPES:
+                        acache[a.question_id] = a.answer
+                    else:
+                        acache[a.question_id] = str(a)
             for a in op.answers.all():
-                acache[a.question_id] = str(a)
+                # We do not want to localize Date, Time and Datetime question answers, as those can lead
+                # to difficulties parsing the data (for example 2019-02-01 may become Février, 2019 01 in French).
+                if a.question.type in Question.UNLOCALIZED_TYPES:
+                    acache[a.question_id] = a.answer
+                else:
+                    acache[a.question_id] = str(a)
             for q in questions:
                 row.append(acache.get(q.pk, ''))
 
             row.append(ia.company)
             row.append(op.voucher.code if op.voucher else "")
             row.append(op.order.datetime.astimezone(self.event.timezone).strftime('%Y-%m-%d'))
+            row.append(_('Yes') if op.order.checkin_attention or op.item.checkin_attention else _('No'))
+            row.append(op.order.comment or "")
             yield row
 
     def get_filename(self):

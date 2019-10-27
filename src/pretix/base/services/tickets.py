@@ -4,13 +4,14 @@ import os
 from django.core.files.base import ContentFile
 from django.utils.timezone import now
 from django.utils.translation import ugettext as _
+from django_scopes import scopes_disabled
 
 from pretix.base.i18n import language
 from pretix.base.models import (
     CachedCombinedTicket, CachedTicket, Event, InvoiceAddress, Order,
     OrderPosition,
 )
-from pretix.base.services.tasks import ProfiledTask
+from pretix.base.services.tasks import EventTask, ProfiledTask
 from pretix.base.settings import PERSON_NAME_SCHEMES
 from pretix.base.signals import allow_ticket_download, register_ticket_outputs
 from pretix.celery_app import app
@@ -46,6 +47,9 @@ def generate_order(order: int, provider: str):
             prov = response(order.event)
             if prov.identifier == provider:
                 filename, ttype, data = prov.generate_order(order)
+                if ttype == 'text/uri-list':
+                    continue
+
                 path, ext = os.path.splitext(filename)
                 for ct in CachedCombinedTicket.objects.filter(order=order, provider=provider):
                     ct.delete()
@@ -57,10 +61,11 @@ def generate_order(order: int, provider: str):
 
 @app.task(base=ProfiledTask)
 def generate(model: str, pk: int, provider: str):
-    if model == 'order':
-        return generate_order(pk, provider)
-    elif model == 'orderposition':
-        return generate_orderposition(pk, provider)
+    with scopes_disabled():
+        if model == 'order':
+            return generate_order(pk, provider)
+        elif model == 'orderposition':
+            return generate_orderposition(pk, provider)
 
 
 class DummyRollbackException(Exception):
@@ -96,7 +101,7 @@ def preview(event: int, provider: str):
                 return prov.generate(p)
 
 
-def get_tickets_for_order(order):
+def get_tickets_for_order(order, base_position=None):
     can_download = all([r for rr, r in allow_ticket_download.send(order.event, order=order)])
     if not can_download:
         return []
@@ -111,20 +116,29 @@ def get_tickets_for_order(order):
 
     tickets = []
 
+    positions = list(order.positions_with_tickets)
+    if base_position:
+        # Only the given position and its children
+        positions = [
+            p for p in positions if p.pk == base_position.pk or p.addon_to_id == base_position.pk
+        ]
+
     for p in providers:
         if not p.is_enabled:
             continue
 
-        if p.multi_download_enabled:
+        if p.multi_download_enabled and not base_position:
             try:
-                if len(list(order.positions_with_tickets)) == 0:
+                if len(positions) == 0:
                     continue
                 ct = CachedCombinedTicket.objects.filter(
                     order=order, provider=p.identifier, file__isnull=False
                 ).last()
                 if not ct or not ct.file:
-                    retval = generate.apply(args=('order', order.pk, p.identifier))
-                    ct = CachedCombinedTicket.objects.get(pk=retval.get())
+                    retval = generate_order(order.pk, p.identifier)
+                    if not retval:
+                        continue
+                    ct = CachedCombinedTicket.objects.get(pk=retval)
                 tickets.append((
                     "{}-{}-{}{}".format(
                         order.event.slug.upper(), order.code, ct.provider, ct.extension,
@@ -134,14 +148,20 @@ def get_tickets_for_order(order):
             except:
                 logger.exception('Failed to generate ticket.')
         else:
-            for pos in order.positions_with_tickets:
+            for pos in positions:
                 try:
                     ct = CachedTicket.objects.filter(
                         order_position=pos, provider=p.identifier, file__isnull=False
                     ).last()
                     if not ct or not ct.file:
-                        retval = generate.apply(args=('orderposition', pos.pk, p.identifier))
-                        ct = CachedTicket.objects.get(pk=retval.get())
+                        retval = generate_orderposition(pos.pk, p.identifier)
+                        if not retval:
+                            continue
+                        ct = CachedTicket.objects.get(pk=retval)
+
+                    if ct.type == 'text/uri-list':
+                        continue
+
                     tickets.append((
                         "{}-{}-{}-{}{}".format(
                             order.event.slug.upper(), order.code, pos.positionid, ct.provider, ct.extension,
@@ -152,3 +172,25 @@ def get_tickets_for_order(order):
                     logger.exception('Failed to generate ticket.')
 
     return tickets
+
+
+@app.task(base=EventTask)
+def invalidate_cache(event: Event, item: int=None, provider: str=None, order: int=None, **kwargs):
+    qs = CachedTicket.objects.filter(order_position__order__event=event)
+    qsc = CachedCombinedTicket.objects.filter(order__event=event)
+
+    if item:
+        qs = qs.filter(order_position__item_id=item)
+
+    if provider:
+        qs = qs.filter(provider=provider)
+        qsc = qsc.filter(provider=provider)
+
+    if order:
+        qs = qs.filter(order_position__order_id=order)
+        qsc = qsc.filter(order_id=order)
+
+    for ct in qs:
+        ct.delete()
+    for ct in qsc:
+        ct.delete()

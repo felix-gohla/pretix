@@ -1,3 +1,4 @@
+import inspect
 import json
 import logging
 import urllib.error
@@ -16,6 +17,7 @@ from django.utils import timezone
 from django.utils.timezone import now
 from django.utils.translation import pgettext, ugettext as _
 from django_countries.fields import Country
+from django_scopes import scope, scopes_disabled
 from i18nfield.strings import LazyI18nString
 
 from pretix.base.i18n import language
@@ -53,7 +55,10 @@ def build_invoice(invoice: Invoice) -> Invoice:
         additional = invoice.event.settings.get('invoice_additional_text', as_type=LazyI18nString)
         footer = invoice.event.settings.get('invoice_footer_text', as_type=LazyI18nString)
         if open_payment and open_payment.payment_provider:
-            payment = open_payment.payment_provider.render_invoice_text(invoice.order)
+            if 'payment' in inspect.signature(open_payment.payment_provider.render_invoice_text).parameters:
+                payment = open_payment.payment_provider.render_invoice_text(invoice.order, open_payment)
+            else:
+                payment = open_payment.payment_provider.render_invoice_text(invoice.order)
         elif invoice.order.status == Order.STATUS_PAID:
             payment = pgettext('invoice', 'The payment for this invoice has already been received.')
         else:
@@ -69,12 +74,15 @@ def build_invoice(invoice: Invoice) -> Invoice:
             addr_template = pgettext("invoice", """{i.company}
 {i.name}
 {i.street}
-{i.zipcode} {i.city}
+{i.zipcode} {i.city} {state}
 {country}""")
-            invoice.invoice_to = addr_template.format(
-                i=ia,
-                country=ia.country.name if ia.country else ia.country_old
-            ).strip()
+            invoice.invoice_to = "\n".join(
+                a.strip() for a in addr_template.format(
+                    i=ia,
+                    country=ia.country.name if ia.country else ia.country_old,
+                    state=ia.state_for_address
+                ).split("\n") if a.strip()
+            )
             invoice.internal_reference = ia.internal_reference
             invoice.invoice_to_company = ia.company
             invoice.invoice_to_name = ia.name
@@ -82,6 +90,7 @@ def build_invoice(invoice: Invoice) -> Invoice:
             invoice.invoice_to_zipcode = ia.zipcode
             invoice.invoice_to_city = ia.city
             invoice.invoice_to_country = ia.country
+            invoice.invoice_to_state = ia.state
             invoice.invoice_to_beneficiary = ia.beneficiary
 
             if ia.vat_id:
@@ -121,7 +130,7 @@ def build_invoice(invoice: Invoice) -> Invoice:
         positions = list(
             invoice.order.positions.select_related('addon_to', 'item', 'tax_rule', 'subevent', 'variation').annotate(
                 addon_c=Count('addons')
-            )
+            ).prefetch_related('answers', 'answers__question').order_by('positionid', 'id')
         )
 
         reverse_charge = False
@@ -156,6 +165,16 @@ def build_invoice(invoice: Invoice) -> Invoice:
                 desc = "  + " + desc
             if invoice.event.settings.invoice_attendee_name and p.attendee_name:
                 desc += "<br />" + pgettext("invoice", "Attendee: {name}").format(name=p.attendee_name)
+
+            for answ in p.answers.all():
+                if not answ.question.print_on_invoice:
+                    continue
+                desc += "<br />{}{} {}".format(
+                    answ.question.question,
+                    "" if str(answ.question.question).endswith("?") else ":",
+                    str(answ)
+                )
+
             if invoice.event.has_subevents:
                 desc += "<br />" + pgettext("subevent", "Date: {}").format(p.subevent)
 
@@ -220,6 +239,8 @@ def build_cancellation(invoice: Invoice):
 
 
 def generate_cancellation(invoice: Invoice, trigger_pdf=True):
+    if invoice.refered.exists():
+        raise ValueError("Invoice should not be canceled twice.")
     cancellation = modelcopy(invoice)
     cancellation.pk = None
     cancellation.invoice_no = None
@@ -273,20 +294,23 @@ def generate_invoice(order: Order, trigger_pdf=True):
 
 @app.task(base=TransactionAwareTask)
 def invoice_pdf_task(invoice: int):
-    i = Invoice.objects.get(pk=invoice)
-    if i.shredded:
-        return None
-    if i.file:
-        i.file.delete()
-    with language(i.locale):
-        fname, ftype, fcontent = i.event.invoice_renderer.generate(i)
-        i.file.save(fname, ContentFile(fcontent))
-        i.save()
-        return i.file.name
+    with scopes_disabled():
+        i = Invoice.objects.get(pk=invoice)
+    with scope(organizer=i.order.event.organizer):
+        if i.shredded:
+            return None
+        if i.file:
+            i.file.delete()
+        with language(i.locale):
+            fname, ftype, fcontent = i.event.invoice_renderer.generate(i)
+            i.file.save(fname, ContentFile(fcontent))
+            i.save()
+            return i.file.name
 
 
 def invoice_qualified(order: Order):
-    if order.total == Decimal('0.00') or order.require_approval:
+    if order.total == Decimal('0.00') or order.require_approval or \
+            order.sales_channel not in order.event.settings.get('invoice_generate_sales_channels'):
         return False
     return True
 

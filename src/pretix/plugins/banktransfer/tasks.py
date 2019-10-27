@@ -2,24 +2,21 @@ import logging
 import re
 from decimal import Decimal
 
-import pytz
 from celery.exceptions import MaxRetriesExceededError
 from django.conf import settings
 from django.db import transaction
 from django.db.models import Q
-from django.utils.formats import date_format
 from django.utils.translation import ugettext, ugettext_noop
+from django_scopes import scope, scopes_disabled
 
+from pretix.base.email import get_email_context
 from pretix.base.i18n import language
-from pretix.base.models import (
-    Event, InvoiceAddress, Order, OrderPayment, Organizer, Quota,
-)
+from pretix.base.models import Event, Order, OrderPayment, Organizer, Quota
 from pretix.base.services.locking import LockTimeoutException
 from pretix.base.services.mail import SendMailException
 from pretix.base.services.orders import change_payment_provider
 from pretix.base.services.tasks import TransactionAwareTask
 from pretix.celery_app import app
-from pretix.multidomain.urlreverse import build_absolute_uri
 
 from .models import BankImportJob, BankTransaction
 
@@ -28,24 +25,8 @@ logger = logging.getLogger(__name__)
 
 def notify_incomplete_payment(o: Order):
     with language(o.locale):
-        tz = pytz.timezone(o.event.settings.get('timezone', settings.TIME_ZONE))
-        try:
-            invoice_name = o.invoice_address.name
-            invoice_company = o.invoice_address.company
-        except InvoiceAddress.DoesNotExist:
-            invoice_name = ""
-            invoice_company = ""
         email_template = o.event.settings.mail_text_order_expire_warning
-        email_context = {
-            'event': o.event.name,
-            'url': build_absolute_uri(o.event, 'presale:event.order', kwargs={
-                'order': o.code,
-                'secret': o.secret
-            }),
-            'expire_date': date_format(o.expires.astimezone(tz), 'SHORT_DATE_FORMAT'),
-            'invoice_name': invoice_name,
-            'invoice_company': invoice_company,
-        }
+        email_context = get_email_context(event=o.event, order=o)
         email_subject = ugettext('Your order received an incomplete payment: %(code)s') % {'code': o.code}
 
         try:
@@ -92,14 +73,23 @@ def _handle_transaction(trans: BankTransaction, code: str, event: Event=None, or
         trans.state = BankTransaction.STATE_ERROR
         trans.message = ugettext_noop('The order has already been canceled.')
     else:
-        p, created = trans.order.payments.get_or_create(
-            amount=trans.amount,
-            provider='banktransfer',
-            state__in=(OrderPayment.PAYMENT_STATE_CREATED, OrderPayment.PAYMENT_STATE_PENDING),
-            defaults={
-                'state': OrderPayment.PAYMENT_STATE_CREATED,
-            }
-        )
+        try:
+            p, created = trans.order.payments.get_or_create(
+                amount=trans.amount,
+                provider='banktransfer',
+                state__in=(OrderPayment.PAYMENT_STATE_CREATED, OrderPayment.PAYMENT_STATE_PENDING),
+                defaults={
+                    'state': OrderPayment.PAYMENT_STATE_CREATED,
+                }
+            )
+        except OrderPayment.MultipleObjectsReturned:
+            created = False
+            p = trans.order.payments.filter(
+                amount=trans.amount,
+                provider='banktransfer',
+                state__in=(OrderPayment.PAYMENT_STATE_CREATED, OrderPayment.PAYMENT_STATE_PENDING),
+            ).last()
+
         p.info_data = {
             'reference': trans.reference,
             'date': trans.date,
@@ -108,8 +98,9 @@ def _handle_transaction(trans: BankTransaction, code: str, event: Event=None, or
         }
 
         if created:
-            # We're perform a payment method switchign on-demand here
-            old_fee, new_fee, fee = change_payment_provider(trans.order, p.payment_provider, p.amount)  # noqa
+            # We're perform a payment method switching on-demand here
+            old_fee, new_fee, fee, p = change_payment_provider(trans.order, p.payment_provider, p.amount,
+                                                               new_payment=p, create_log=False)  # noqa
             if fee:
                 p.fee = fee
                 p.save(update_fields=['fee'])
@@ -184,51 +175,53 @@ def _get_unknown_transactions(job: BankImportJob, data: list, event: Event=None,
 @app.task(base=TransactionAwareTask, bind=True, max_retries=5, default_retry_delay=1)
 def process_banktransfers(self, job: int, data: list) -> None:
     with language("en"):  # We'll translate error messages at display time
-        job = BankImportJob.objects.get(pk=job)
-        job.state = BankImportJob.STATE_RUNNING
-        job.save()
-        prefixes = []
+        with scopes_disabled():
+            job = BankImportJob.objects.get(pk=job)
+        with scope(organizer=job.organizer or job.event.organizer):
+            job.state = BankImportJob.STATE_RUNNING
+            job.save()
+            prefixes = []
 
-        try:
-            # Delete left-over transactions from a failed run before so they can reimported
-            BankTransaction.objects.filter(state=BankTransaction.STATE_UNCHECKED, **job.owner_kwargs).delete()
-
-            transactions = _get_unknown_transactions(job, data, **job.owner_kwargs)
-
-            code_len = settings.ENTROPY['order_code']
-            if job.event:
-                pattern = re.compile(job.event.slug.upper() + r"[ \-_]*([A-Z0-9]{%s})" % code_len)
-            else:
-                if not prefixes:
-                    prefixes = [e.slug.upper().replace(".", r"\.").replace("-", r"[\- ]*")
-                                for e in job.organizer.events.all()]
-                pattern = re.compile("(%s)[ \\-_]*([A-Z0-9]{%s})" % ("|".join(prefixes), code_len))
-
-            for trans in transactions:
-                match = pattern.search(trans.reference.replace(" ", "").replace("\n", "").upper())
-
-                if match:
-                    if job.event:
-                        code = match.group(1)
-                        _handle_transaction(trans, code, event=job.event)
-                    else:
-                        slug = match.group(1)
-                        code = match.group(2)
-                        _handle_transaction(trans, code, organizer=job.organizer, slug=slug)
-                else:
-                    trans.state = BankTransaction.STATE_NOMATCH
-                    trans.save()
-        except LockTimeoutException:
             try:
-                self.retry()
-            except MaxRetriesExceededError:
-                logger.exception('Maximum number of retries exceeded for task.')
+                # Delete left-over transactions from a failed run before so they can reimported
+                BankTransaction.objects.filter(state=BankTransaction.STATE_UNCHECKED, **job.owner_kwargs).delete()
+
+                transactions = _get_unknown_transactions(job, data, **job.owner_kwargs)
+
+                code_len = settings.ENTROPY['order_code']
+                if job.event:
+                    pattern = re.compile(job.event.slug.upper() + r"[ \-_]*([A-Z0-9]{%s})" % code_len)
+                else:
+                    if not prefixes:
+                        prefixes = [e.slug.upper().replace(".", r"\.").replace("-", r"[\- ]*")
+                                    for e in job.organizer.events.all()]
+                    pattern = re.compile("(%s)[ \\-_]*([A-Z0-9]{%s})" % ("|".join(prefixes), code_len))
+
+                for trans in transactions:
+                    match = pattern.search(trans.reference.replace(" ", "").replace("\n", "").upper())
+
+                    if match:
+                        if job.event:
+                            code = match.group(1)
+                            _handle_transaction(trans, code, event=job.event)
+                        else:
+                            slug = match.group(1)
+                            code = match.group(2)
+                            _handle_transaction(trans, code, organizer=job.organizer, slug=slug)
+                    else:
+                        trans.state = BankTransaction.STATE_NOMATCH
+                        trans.save()
+            except LockTimeoutException:
+                try:
+                    self.retry()
+                except MaxRetriesExceededError:
+                    logger.exception('Maximum number of retries exceeded for task.')
+                    job.state = BankImportJob.STATE_ERROR
+                    job.save()
+            except Exception as e:
                 job.state = BankImportJob.STATE_ERROR
                 job.save()
-        except Exception as e:
-            job.state = BankImportJob.STATE_ERROR
-            job.save()
-            raise e
-        else:
-            job.state = BankImportJob.STATE_COMPLETED
-            job.save()
+                raise e
+            else:
+                job.state = BankImportJob.STATE_COMPLETED
+                job.save()

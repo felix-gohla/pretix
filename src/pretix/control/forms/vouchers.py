@@ -3,6 +3,7 @@ from django.core.exceptions import ObjectDoesNotExist, ValidationError
 from django.db.models.functions import Lower
 from django.urls import reverse
 from django.utils.translation import pgettext_lazy, ugettext_lazy as _
+from django_scopes.forms import SafeModelChoiceField
 
 from pretix.base.forms import I18nModelForm
 from pretix.base.models import Item, Voucher
@@ -31,10 +32,11 @@ class VoucherForm(I18nModelForm):
         localized_fields = '__all__'
         fields = [
             'code', 'valid_until', 'block_quota', 'allow_ignore_quota', 'value', 'tag',
-            'comment', 'max_usages', 'price_mode', 'subevent'
+            'comment', 'max_usages', 'price_mode', 'subevent', 'show_hidden_items'
         ]
         field_classes = {
             'valid_until': SplitDateTimeField,
+            'subevent': SafeModelChoiceField,
         }
         widgets = {
             'valid_until': SplitDateTimePickerWidget(),
@@ -140,12 +142,22 @@ class VoucherForm(I18nModelForm):
             data['codes'] = [a.strip() for a in data.get('codes', '').strip().split("\n") if a]
             cnt = len(data['codes']) * data.get('max_usages', 0)
         else:
-            cnt = data['max_usages']
+            cnt = data.get('max_usages', 0)
 
         Voucher.clean_item_properties(
             data, self.instance.event,
             self.instance.quota, self.instance.item, self.instance.variation
         )
+        if not self.instance.show_hidden_items and (
+            (self.instance.quota and all(i.hide_without_voucher for i in self.instance.quota.items.all()))
+            or (self.instance.item and self.instance.item.hide_without_voucher)
+        ):
+            raise ValidationError({
+                'show_hidden_items': [
+                    _('The voucher only matches hidden products but you have not selected that it should show '
+                      'them.')
+                ]
+            })
         Voucher.clean_subevent(
             data, self.instance.event
         )
@@ -167,9 +179,7 @@ class VoucherForm(I18nModelForm):
         return data
 
     def save(self, commit=True):
-        super().save(commit)
-
-        return ['item']
+        return super().save(commit)
 
 
 class VoucherBulkForm(VoucherForm):
@@ -187,10 +197,11 @@ class VoucherBulkForm(VoucherForm):
         localized_fields = '__all__'
         fields = [
             'valid_until', 'block_quota', 'allow_ignore_quota', 'value', 'tag', 'comment',
-            'max_usages', 'price_mode', 'subevent'
+            'max_usages', 'price_mode', 'subevent', 'show_hidden_items'
         ]
         field_classes = {
             'valid_until': SplitDateTimeField,
+            'subevent': SafeModelChoiceField,
         }
         widgets = {
             'valid_until': SplitDateTimePickerWidget(),

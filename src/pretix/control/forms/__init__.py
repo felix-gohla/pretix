@@ -4,8 +4,8 @@ import os
 from django import forms
 from django.conf import settings
 from django.core.exceptions import ValidationError
+from django.core.files import File
 from django.forms.utils import from_current_timezone
-from django.utils.html import conditional_escape
 from django.utils.translation import ugettext_lazy as _
 
 from ...base.forms import I18nModelForm
@@ -67,16 +67,31 @@ def selector(values, prop):
 
 
 class ClearableBasenameFileInput(forms.ClearableFileInput):
+    template_name = 'pretixbase/forms/widgets/thumbnailed_file_input.html'
 
-    def get_template_substitution_values(self, value):
-        """
-        Return value-related substitutions.
-        """
-        bname = os.path.basename(value.name)
-        return {
-            'initial': conditional_escape(bname),
-            'initial_url': conditional_escape(value.url),
-        }
+    class FakeFile(File):
+        def __init__(self, file):
+            self.file = file
+
+        @property
+        def name(self):
+            return self.file.name
+
+        @property
+        def is_img(self):
+            return any(self.file.name.endswith(e) for e in ('.jpg', '.jpeg', '.png', '.gif'))
+
+        def __str__(self):
+            return os.path.basename(self.file.name).split('.', 1)[-1]
+
+        @property
+        def url(self):
+            return self.file.url
+
+    def get_context(self, name, value, attrs):
+        ctx = super().get_context(name, value, attrs)
+        ctx['widget']['value'] = self.FakeFile(value)
+        return ctx
 
 
 class ExtFileField(forms.FileField):
@@ -185,3 +200,7 @@ class SplitDateTimeField(forms.SplitDateTimeField):
             result = datetime.datetime.combine(*data_list)
             return from_current_timezone(result)
         return None
+
+
+class FontSelect(forms.RadioSelect):
+    option_template_name = 'pretixcontrol/font_option.html'

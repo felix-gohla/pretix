@@ -2,6 +2,7 @@ import time
 
 import pytest
 from django.test import override_settings
+from django.utils.timezone import now
 
 from pretix.base.models import Organizer
 
@@ -25,6 +26,7 @@ event_permission_sub_urls = [
     ('get', 'can_view_orders', 'orders/', 200),
     ('get', 'can_view_orders', 'orderpositions/', 200),
     ('delete', 'can_change_orders', 'orderpositions/1/', 404),
+    ('post', 'can_change_orders', 'orderpositions/1/price_calc/', 404),
     ('get', 'can_view_vouchers', 'vouchers/', 200),
     ('get', 'can_view_orders', 'invoices/', 200),
     ('get', 'can_view_orders', 'invoices/1/', 404),
@@ -95,6 +97,7 @@ event_permission_sub_urls = [
     ('patch', 'can_change_items', 'questions/1/options/1/', 404),
     ('delete', 'can_change_items', 'questions/1/options/1/', 404),
     ('post', 'can_change_orders', 'orders/', 400),
+    ('patch', 'can_change_orders', 'orders/ABC12/', 404),
     ('post', 'can_change_orders', 'orders/ABC12/mark_paid/', 404),
     ('post', 'can_change_orders', 'orders/ABC12/mark_pending/', 404),
     ('post', 'can_change_orders', 'orders/ABC12/mark_expired/', 404),
@@ -102,6 +105,9 @@ event_permission_sub_urls = [
     ('post', 'can_change_orders', 'orders/ABC12/approve/', 404),
     ('post', 'can_change_orders', 'orders/ABC12/deny/', 404),
     ('post', 'can_change_orders', 'orders/ABC12/extend/', 400),
+    ('post', 'can_change_orders', 'orders/ABC12/create_invoice/', 404),
+    ('post', 'can_change_orders', 'orders/ABC12/resend_link/', 404),
+    ('post', 'can_change_orders', 'orders/ABC12/regenerate_secrets/', 404),
     ('get', 'can_view_orders', 'orders/ABC12/payments/', 404),
     ('get', 'can_view_orders', 'orders/ABC12/payments/1/', 404),
     ('get', 'can_view_orders', 'orders/ABC12/refunds/', 404),
@@ -131,6 +137,11 @@ org_permission_sub_urls = [
     ('put', 'can_change_organizer_settings', 'webhooks/1/', 404),
     ('patch', 'can_change_organizer_settings', 'webhooks/1/', 404),
     ('delete', 'can_change_organizer_settings', 'webhooks/1/', 404),
+    ('get', 'can_manage_gift_cards', 'giftcards/', 200),
+    ('post', 'can_manage_gift_cards', 'giftcards/', 400),
+    ('get', 'can_manage_gift_cards', 'giftcards/1/', 404),
+    ('put', 'can_manage_gift_cards', 'giftcards/1/', 404),
+    ('patch', 'can_manage_gift_cards', 'giftcards/1/', 404),
 ]
 
 
@@ -438,3 +449,17 @@ def test_token_org_subresources_permission_not_allowed(token_client, team, organ
         assert resp.status_code == 403
     else:
         assert resp.status_code in (404, 403)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("url", event_urls)
+def test_event_staff_requires_staff_session(user_client, organizer, team, event, url, user):
+    team.delete()
+    user.is_staff = True
+    user.save()
+
+    resp = user_client.get('/api/v1/organizers/{}/events/{}/{}'.format(organizer.slug, event.slug, url[1]))
+    assert resp.status_code == 403
+    user.staffsession_set.create(date_start=now(), session_key=user_client.session.session_key)
+    resp = user_client.get('/api/v1/organizers/{}/events/{}/{}'.format(organizer.slug, event.slug, url[1]))
+    assert resp.status_code == 200

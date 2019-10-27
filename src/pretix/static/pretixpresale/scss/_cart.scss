@@ -63,6 +63,14 @@
         padding-left: 10px;
         font-weight: bold;
     }
+
+    dl {
+      margin: 5px 0;
+        dt {
+            font-weight: normal;
+            margin-top: 5px;
+        }
+    }
 }
 
 @media(max-width: $screen-sm-max) {
@@ -87,4 +95,7 @@
 }
 .cart-modify {
     margin-left: 10px;
+}
+.btn-invisible {
+    opacity: 0 !important;
 }

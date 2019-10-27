@@ -11,6 +11,17 @@ of every page in the frontend. You will get the request as the keyword argument
 As with all plugin signals, the ``sender`` keyword argument will contain the event.
 """
 
+html_page_header = EventPluginSignal(
+    providing_args=["request"]
+)
+"""
+This signal allows you to put code right in the beginning of the HTML ``<body>`` tag
+of every page in the frontend. You will get the request as the keyword argument
+``request`` and are expected to return plain HTML.
+
+As with all plugin signals, the ``sender`` keyword argument will contain the event.
+"""
+
 html_footer = EventPluginSignal(
     providing_args=["request"]
 )
@@ -18,6 +29,33 @@ html_footer = EventPluginSignal(
 This signal allows you to put code before the end of the HTML ``<body>`` tag
 of every page in the frontend. You will get the request as the keyword argument
 ``request`` and are expected to return plain HTML.
+
+As with all plugin signals, the ``sender`` keyword argument will contain the event.
+"""
+
+sass_preamble = EventPluginSignal(
+    providing_args=["filename"]
+)
+"""
+This signal allows you to put SASS code at the beginning of the event-specific
+stylesheet. Keep in mind that this will only be called/rebuilt when the user changes
+display settings or pretix gets updated. You will get the filename that is being
+generated (usually "main.scss" or "widget.scss"). This SASS code will be loaded *after*
+setting of user-defined variables like colors and fonts but *before* pretix' SASS
+code.
+
+As with all plugin signals, the ``sender`` keyword argument will contain the event.
+"""
+
+sass_postamble = EventPluginSignal(
+    providing_args=["filename"]
+)
+"""
+This signal allows you to put SASS code at the end of the event-specific
+stylesheet. Keep in mind that this will only be called/rebuilt when the user changes
+display settings or pretix gets updated. You will get the filename that is being
+generated (usually "main.scss" or "widget.scss"). This SASS code will be loaded *after*
+all of pretix' SASS code.
 
 As with all plugin signals, the ``sender`` keyword argument will contain the event.
 """
@@ -44,7 +82,8 @@ As with all plugin signals, the ``sender`` keyword argument will contain the eve
 
 checkout_flow_steps = EventPluginSignal()
 """
-This signal is sent out to retrieve pages for the checkout flow
+This signal is sent out to retrieve pages for the checkout flow. Receivers are expected to return
+a subclass of ``pretix.presale.checkoutflow.BaseCheckoutFlowStep``.
 
 As with all plugin signals, the ``sender`` keyword argument will contain the event.
 """
@@ -130,6 +169,15 @@ This signal is sent out to display additional information on the order detail pa
 As with all plugin signals, the ``sender`` keyword argument will contain the event.
 """
 
+position_info = EventPluginSignal(
+    providing_args=["order", "position"]
+)
+"""
+This signal is sent out to display additional information on the position detail page
+
+As with all plugin signals, the ``sender`` keyword argument will contain the event.
+"""
+
 process_request = EventPluginSignal(
     providing_args=["request"]
 )
@@ -169,6 +217,18 @@ front_page_top = EventPluginSignal(
 """
 This signal is sent out to display additional information on the frontpage above the list
 of products and but below a custom frontpage text.
+
+As with all plugin signals, the ``sender`` keyword argument will contain the event. The
+receivers are expected to return HTML.
+"""
+
+render_seating_plan = EventPluginSignal(
+    providing_args=["request", "subevent", "voucher"]
+)
+"""
+This signal is sent out to render a seating plan, if one is configured for the specific event.
+You will be passed the ``request`` as a keyword argument. If applicable, a ``subevent`` or
+``voucher`` argument might be given.
 
 As with all plugin signals, the ``sender`` keyword argument will contain the event. The
 receivers are expected to return HTML.

@@ -114,6 +114,40 @@ If you want to disable voucher input in the widget, you can pass the ``disable-v
 
    <pretix-widget event="https://pretix.eu/demo/democon/" disable-vouchers></pretix-widget>
 
+Multi-event selection
+---------------------
+
+If you want to embed multiple events in a single widget, you can do so. If it's multiple dates of an event series, just leave off the ``series`` attribute::
+
+   <pretix-widget event="https://pretix.eu/demo/series/"></pretix-widget>
+
+If you want to include all your public events, you can just reference your organizer::
+
+   <pretix-widget event="https://pretix.eu/demo/"></pretix-widget>
+
+There is an optional ``style`` parameter that let's you choose between a calendar view and a list view. If you do not set it, the choice will be taken from your organizer settings::
+
+   <pretix-widget event="https://pretix.eu/demo/series/" style="list"></pretix-widget>
+   <pretix-widget event="https://pretix.eu/demo/series/" style="calendar"></pretix-widget>
+
+You can see an example here:
+
+.. raw:: html
+
+    <pretix-widget event="https://pretix.eu/demo/series/" style="calendar"></pretix-widget>
+    <noscript>
+       <div class="pretix-widget">
+            <div class="pretix-widget-info-message">
+                JavaScript is disabled in your browser. To access our ticket shop without javascript, please <a target="_blank" href="https://pretix.eu/demo/series/">click here</a>.
+            </div>
+        </div>
+    </noscript>
+
+You can filter events by meta data attributes. You can create those attributes in your order profile and set their values in both event and series date
+settings. For example, if you set up a meta data property called "Promoted" that you set to "Yes" on some events, you can pass a filter like this::
+
+   <pretix-widget event="https://pretix.eu/demo/series/" style="list" filter="attr[Promoted]=Yes"></pretix-widget>
+
 pretix Button
 -------------
 
@@ -171,6 +205,21 @@ If you want, you can suppress us loading the widget and/or modify the user data 
     </script>
 
 If you then later want to trigger loading the widgets, just call ``window.PretixWidget.buildWidgets()``.
+
+Waiting for the widget to load
+------------------------------
+
+If you want to run custom JavaScript once the widget is fully loaded, you can register a callback function. Note that
+this function might be run multiple times, for example if you have multiple widgets on a page or if the user switches
+e.g. from an event list to an event detail view::
+
+    <script type="text/javascript">
+    window.pretixWidgetCallback = function () {
+        window.PretixWidget.addLoadListener(function () {
+            console.log("Widget has loaded!");
+        });
+    }
+    </script>
 
 
 Passing user data to the widget
@@ -239,6 +288,9 @@ Hosted or pretix Enterprise are active, you can pass the following fields:
             });
         };
     </script>
+
+  In some combinations with Google Tag Manager, the widget does not load this way. In this case, try replacing
+  ``tracker.get('clientId')`` with ``ga.getAll()[0].get('clientId')``.
 
 
 .. versionchanged:: 2.3
