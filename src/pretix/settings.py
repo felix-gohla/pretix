@@ -61,6 +61,8 @@ DEBUG = config.getboolean('django', 'debug', fallback=debug_fallback)
 
 PDFTK = config.get('tools', 'pdftk', fallback=None)
 
+PRETIX_AUTH_BACKENDS = config.get('pretix', 'auth_backends', fallback='pretix.base.auth.NativeAuthBackend').split(',')
+
 db_backend = config.get('database', 'backend', fallback='sqlite3')
 if db_backend == 'postgresql_psycopg2':
     db_backend = 'postgresql'
@@ -109,6 +111,7 @@ if config.has_section('replica'):
             'COLLATION': 'utf8mb4_unicode_ci',
         } if 'mysql' in db_backend else {}
     }
+    DATABASE_ROUTERS = ['pretix.helpers.database.ReplicaRouter']
 
 STATIC_URL = config.get('urls', 'static', fallback='/static/')
 
@@ -119,6 +122,7 @@ PRETIX_REGISTRATION = config.getboolean('pretix', 'registration', fallback=True)
 PRETIX_PASSWORD_RESET = config.getboolean('pretix', 'password_reset', fallback=True)
 PRETIX_LONG_SESSIONS = config.getboolean('pretix', 'long_sessions', fallback=True)
 PRETIX_ADMIN_AUDIT_COMMENTS = config.getboolean('pretix', 'audit_comments', fallback=False)
+PRETIX_OBLIGATORY_2FA = config.getboolean('pretix', 'obligatory_2fa', fallback=False)
 PRETIX_SESSION_TIMEOUT_RELATIVE = 3600 * 3
 PRETIX_SESSION_TIMEOUT_ABSOLUTE = 3600 * 12
 
@@ -128,8 +132,10 @@ if SITE_URL.endswith('/'):
 
 CSRF_TRUSTED_ORIGINS = [urlparse(SITE_URL).hostname]
 
+TRUST_X_FORWARDED_FOR = config.get('pretix', 'trust_x_forwarded_for', fallback=False)
+
 PRETIX_PLUGINS_DEFAULT = config.get('pretix', 'plugins_default',
-                                    fallback='pretix.plugins.sendmail,pretix.plugins.statistics,pretix.plugins.checkinlists')
+                                    fallback='pretix.plugins.sendmail,pretix.plugins.statistics,pretix.plugins.checkinlists,pretix.plugins.autocheckin')
 PRETIX_PLUGINS_EXCLUDE = config.get('pretix', 'plugins_exclude', fallback='').split(',')
 
 FETCH_ECB_RATES = config.getboolean('pretix', 'ecb_rates', fallback=True)
@@ -235,6 +241,7 @@ ENTROPY = {
     'order_code': config.getint('entropy', 'order_code', fallback=5),
     'ticket_secret': config.getint('entropy', 'ticket_secret', fallback=32),
     'voucher_code': config.getint('entropy', 'voucher_code', fallback=16),
+    'giftcard_secret': config.getint('entropy', 'giftcard_secret', fallback=12),
 }
 
 # Internal settings
@@ -275,6 +282,7 @@ INSTALLED_APPS = [
     'pretix.plugins.pretixdroid',
     'pretix.plugins.badges',
     'pretix.plugins.manualpayment',
+    'pretix.plugins.returnurl',
     'django_markup',
     'django_otp',
     'django_otp.plugins.otp_totp',
@@ -329,6 +337,7 @@ CORE_MODULES = {
 }
 
 MIDDLEWARE = [
+    'pretix.api.middleware.IdempotencyMiddleware',
     'django.middleware.common.CommonMiddleware',
     'pretix.multidomain.middlewares.MultiDomainMiddleware',
     'pretix.multidomain.middlewares.SessionMiddleware',
@@ -341,6 +350,7 @@ MIDDLEWARE = [
     'pretix.base.middleware.LocaleMiddleware',
     'pretix.base.middleware.SecurityMiddleware',
     'pretix.presale.middleware.EventMiddleware',
+    'pretix.api.middleware.ApiScopeMiddleware',
 ]
 
 try:
@@ -376,9 +386,11 @@ USE_I18N = True
 USE_L10N = True
 USE_TZ = True
 
-LOCALE_PATHS = (
+LOCALE_PATHS = [
     os.path.join(os.path.dirname(__file__), 'locale'),
-)
+]
+if config.has_option('languages', 'path'):
+    LOCALE_PATHS.insert(0, config.get('languages', 'path'))
 
 FORMAT_MODULE_PATH = [
     'pretix.helpers.formats',
@@ -395,12 +407,19 @@ ALL_LANGUAGES = [
     ('pt-br', _('Portuguese (Brazil)')),
     ('es', _('Spanish')),
     ('tr', _('Turkish')),
+    ('pl', _('Polish')),
+    ('it', _('Italian')),
+    ('zh-hans', _('Chinese (simplified)')),
+    ('el', _('Greek'))
 ]
 LANGUAGES_OFFICIAL = {
     'en', 'de', 'de-informal'
 }
 LANGUAGES_INCUBATING = {
-    'pt-br', 'da'
+    'pt-br', 'pl', 'it',
+} - set(config.get('languages', 'allow_incubating', fallback='').split(','))
+LANGUAGES_RTL = {
+    'ar', 'hw'
 }
 
 if DEBUG:
@@ -421,6 +440,12 @@ EXTRA_LANG_INFO = {
         'code': 'nl-informal',
         'name': 'Dutch (informal)',
         'name_local': 'Nederlands'
+    },
+    'fr': {
+        'bidi': False,
+        'code': 'fr',
+        'name': 'French',
+        'name_local': 'Français'
     },
 }
 
@@ -458,6 +483,7 @@ TEMPLATES = [
                 'django.template.context_processors.static',
                 'django.template.context_processors.tz',
                 'django.contrib.messages.context_processors.messages',
+                'pretix.base.context.contextprocessor',
                 'pretix.control.context.contextprocessor',
                 'pretix.presale.context.contextprocessor',
             ],
@@ -589,12 +615,14 @@ LOGGING = {
     },
 }
 
-if config.has_option('sentry', 'dsn'):
+SENTRY_ENABLED = False
+if config.has_option('sentry', 'dsn') and not any(c in sys.argv for c in ('shell', 'shell_scoped', 'shell_plus')):
     import sentry_sdk
     from sentry_sdk.integrations.celery import CeleryIntegration
     from sentry_sdk.integrations.logging import LoggingIntegration, ignore_logger
     from .sentry import PretixSentryIntegration, setup_custom_filters
 
+    SENTRY_ENABLED = True
     sentry_sdk.init(
         dsn=config.get('sentry', 'dsn'),
         integrations=[
@@ -608,7 +636,6 @@ if config.has_option('sentry', 'dsn'):
         environment=SITE_URL,
         release=__version__,
         send_default_pii=False,
-
     )
     ignore_logger('pretix.base.tasks')
     ignore_logger('django.security.DisallowedHost')
@@ -628,12 +655,12 @@ CELERY_TASK_ROUTES = ([
     ('pretix.base.services.cart.*', {'queue': 'checkout'}),
     ('pretix.base.services.orders.*', {'queue': 'checkout'}),
     ('pretix.base.services.mail.*', {'queue': 'mail'}),
-    ('pretix.base.services.style.*', {'queue': 'background'}),
     ('pretix.base.services.update_check.*', {'queue': 'background'}),
     ('pretix.base.services.quotas.*', {'queue': 'background'}),
     ('pretix.base.services.waitinglist.*', {'queue': 'background'}),
     ('pretix.base.services.notifications.*', {'queue': 'notifications'}),
     ('pretix.api.webhooks.*', {'queue': 'notifications'}),
+    ('pretix.presale.style.*', {'queue': 'background'}),
     ('pretix.plugins.banktransfer.*', {'queue': 'background'}),
 ],)
 

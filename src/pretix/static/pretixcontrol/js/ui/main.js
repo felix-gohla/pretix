@@ -1,5 +1,19 @@
 /*global $,gettext*/
 
+function gettext(msgid) {
+    if (typeof django !== 'undefined' && typeof django.gettext !== 'undefined') {
+        return django.gettext(msgid);
+    }
+    return msgid;
+}
+
+function ngettext(singular, plural, count) {
+    if (typeof django !== 'undefined' && typeof django.ngettext !== 'undefined') {
+        return django.ngettext(singular, plural, count);
+    }
+    return plural;
+}
+
 var waitingDialog = {
     show: function (message) {
         "use strict";
@@ -226,7 +240,6 @@ var form_handlers = function (el) {
                     'shade.'));
             $note.addClass("text-danger").removeClass("text-success").removeClass("text-warning");
         }
-        console.log(c);
     });
 
     el.find("input[data-checkbox-dependency]").each(function () {
@@ -243,7 +256,7 @@ var form_handlers = function (el) {
         dependency.on("change", update);
     });
 
-    el.find("input[data-inverse-dependency]").each(function () {
+    el.find("select[data-inverse-dependency], input[data-inverse-dependency]").each(function () {
         var dependency = $(this).attr("data-inverse-dependency");
         if (dependency.substr(0, 1) === '<') {
             dependency = $(this).closest("form, .form-horizontal").find(dependency.substr(1));
@@ -260,7 +273,7 @@ var form_handlers = function (el) {
         dependency.on("change", update);
     });
 
-    $("div[data-display-dependency], input[data-display-dependency]").each(function () {
+    el.find("div[data-display-dependency], input[data-display-dependency]").each(function () {
         var dependent = $(this),
             dependency = $($(this).attr("data-display-dependency")),
             update = function (ev) {
@@ -296,6 +309,42 @@ var form_handlers = function (el) {
         update();
         dependency.closest('.form-group').find('input[name=' + dependency.attr("name") + ']').on("change", update);
         dependency.closest('.form-group').find('input[name=' + dependency.attr("name") + ']').on("dp.change", update);
+    });
+
+    $("select[name$=state]").each(function () {
+        var dependent = $(this),
+            counter = 0,
+            dependency = $(this).closest("form").find('select[name$=country]'),
+            update = function (ev) {
+                counter++;
+                var curCounter = counter;
+                dependent.prop("disabled", true);
+                dependency.closest(".form-group").find("label").prepend("<span class='fa fa-cog fa-spin'></span> ");
+                $.getJSON('/js_helpers/states/?country=' + dependency.val(), function (data) {
+                    if (counter > curCounter) {
+                        return;  // Lost race
+                    }
+                    dependent.find("option").filter(function (t) {return !!$(this).attr("value")}).remove();
+                    if (data.data.length > 0) {
+                        $.each(data.data, function (k, s) {
+                            dependent.append($("<option>").attr("value", s.code).text(s.name));
+                        });
+                        dependent.closest(".form-group").show();
+                        dependent.prop('required', dependency.prop("required"));
+                    } else {
+                        dependent.closest(".form-group").hide();
+                        dependent.prop("required", false);
+                    }
+                    dependent.prop("disabled", false);
+                    dependency.closest(".form-group").find("label .fa-spin").remove();
+                });
+            };
+        if (dependent.find("option").length === 1) {
+            dependent.closest(".form-group").hide();
+        } else {
+            dependent.prop('required', dependency.prop("required"));
+        }
+        dependency.on("change", update);
     });
 
     el.find("div.scrolling-multiple-choice").each(function () {
@@ -444,6 +493,7 @@ $(function () {
     "use strict";
 
     $("body").removeClass("nojs");
+    lightbox.init();
 
     $("[data-formset]").formset(
         {
@@ -605,16 +655,22 @@ $(function () {
         }
     });
 
-    $("a[data-expandlogs]").click(function (e) {
+    $("a[data-expandlogs], a[data-expandrefund], a[data-expandpayment]").click(function (e) {
         e.preventDefault();
         var $a = $(this);
         var id = $(this).attr("data-id");
         $a.find(".fa").removeClass("fa-eye").addClass("fa-cog fa-spin");
-        $.getJSON('/control/logdetail/?pk=' + id, function (data) {
+        var url = '/control/logdetail/';
+        if ($a.is("[data-expandrefund]")) {
+            url += 'refund/'
+        } else if ($a.is("[data-expandpayment]")) {
+            url += 'payment/'
+        }
+        $.getJSON(url + '?pk=' + id, function (data) {
             if ($a.parent().tagName === "p") {
-                $("<pre>").html(JSON.stringify(data.data, null, 2)).insertAfter($a.parent());
+                $("<pre>").text(JSON.stringify(data.data, null, 2)).insertAfter($a.parent());
             } else {
-                $("<pre>").html(JSON.stringify(data.data, null, 2)).appendTo($a.parent());
+                $("<pre>").text(JSON.stringify(data.data, null, 2)).appendTo($a.parent());
             }
             $a.remove();
         });

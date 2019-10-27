@@ -1,7 +1,9 @@
+import json
 import logging
 import time
 from urllib.parse import quote
 
+import webauthn
 from django.conf import settings
 from django.contrib import messages
 from django.contrib.auth import (
@@ -17,17 +19,39 @@ from django.utils.http import is_safe_url
 from django.utils.translation import ugettext_lazy as _
 from django.views.generic import TemplateView
 from django_otp import match_token
-from u2flib_server import u2f
-from u2flib_server.jsapi import DeviceRegistration
-from u2flib_server.utils import rand_bytes
 
+from pretix.base.auth import get_auth_backends
 from pretix.base.forms.auth import (
     LoginForm, PasswordForgotForm, PasswordRecoverForm, RegistrationForm,
 )
-from pretix.base.models import TeamInvite, U2FDevice, User
+from pretix.base.models import TeamInvite, U2FDevice, User, WebAuthnDevice
 from pretix.base.services.mail import SendMailException
+from pretix.helpers.webauthn import generate_challenge
 
 logger = logging.getLogger(__name__)
+
+
+def process_login(request, user, keep_logged_in):
+    """
+    This method allows you to return a response to a successful log-in. This will set all session values correctly
+    and redirect to either the URL specified in the ``next`` parameter, or the 2FA login screen, or the dashboard.
+
+    :return: This method returns a ``HttpResponse``.
+    """
+    request.session['pretix_auth_long_session'] = settings.PRETIX_LONG_SESSIONS and keep_logged_in
+    if user.require_2fa:
+        request.session['pretix_auth_2fa_user'] = user.pk
+        request.session['pretix_auth_2fa_time'] = str(int(time.time()))
+        twofa_url = reverse('control:auth.login.2fa')
+        if "next" in request.GET and is_safe_url(request.GET.get("next"), allowed_hosts=None):
+            twofa_url += '?next=' + quote(request.GET.get('next'))
+        return redirect(twofa_url)
+    else:
+        auth_login(request, user)
+        request.session['pretix_auth_login_time'] = int(time.time())
+        if "next" in request.GET and is_safe_url(request.GET.get("next"), allowed_hosts=None):
+            return redirect(request.GET.get("next"))
+        return redirect(reverse('control:index'))
 
 
 def login(request):
@@ -36,32 +60,30 @@ def login(request):
     parameter "next" for redirection after successful login
     """
     ctx = {}
+    backenddict = get_auth_backends()
+    backends = sorted(backenddict.values(), key=lambda b: (b.identifier != "native", b.verbose_name))
+    for b in backends:
+        u = b.request_authenticate(request)
+        if u and u.auth_backend == b.identifier:
+            return process_login(request, u, False)
+        b.url = b.authentication_url(request)
+
+    backend = backenddict.get(request.GET.get('backend', 'native'), backends[0])
+    if not backend.visible:
+        backend = [b for b in backends if b.visible][0]
     if request.user.is_authenticated:
         return redirect(request.GET.get("next", 'control:index'))
     if request.method == 'POST':
-        form = LoginForm(data=request.POST)
-        if form.is_valid() and form.user_cache:
-            request.session['pretix_auth_long_session'] = (
-                settings.PRETIX_LONG_SESSIONS and form.cleaned_data.get('keep_logged_in', False)
-            )
-            if form.user_cache.require_2fa:
-                request.session['pretix_auth_2fa_user'] = form.user_cache.pk
-                request.session['pretix_auth_2fa_time'] = str(int(time.time()))
-                twofa_url = reverse('control:auth.login.2fa')
-                if "next" in request.GET and is_safe_url(request.GET.get("next"), allowed_hosts=None):
-                    twofa_url += '?next=' + quote(request.GET.get('next'))
-                return redirect(twofa_url)
-            else:
-                auth_login(request, form.user_cache)
-                request.session['pretix_auth_login_time'] = int(time.time())
-                if "next" in request.GET and is_safe_url(request.GET.get("next"), allowed_hosts=None):
-                    return redirect(request.GET.get("next"))
-                return redirect(reverse('control:index'))
+        form = LoginForm(backend=backend, data=request.POST)
+        if form.is_valid() and form.user_cache and form.user_cache.auth_backend == backend.identifier:
+            return process_login(request, form.user_cache, form.cleaned_data.get('keep_logged_in', False))
     else:
-        form = LoginForm()
+        form = LoginForm(backend=backend)
     ctx['form'] = form
     ctx['can_register'] = settings.PRETIX_REGISTRATION
     ctx['can_reset'] = settings.PRETIX_PASSWORD_RESET
+    ctx['backends'] = backends
+    ctx['backend'] = backend
     return render(request, 'pretixcontrol/auth/login.html', ctx)
 
 
@@ -74,6 +96,8 @@ def logout(request):
     next = reverse('control:auth.login')
     if 'next' in request.GET and is_safe_url(request.GET.get('next'), allowed_hosts=None):
         next += '?next=' + quote(request.GET.get('next'))
+    if 'back' in request.GET and is_safe_url(request.GET.get('back'), allowed_hosts=None):
+        return redirect(request.GET.get('back'))
     return redirect(next)
 
 
@@ -81,7 +105,7 @@ def register(request):
     """
     Render and process a basic registration form.
     """
-    if not settings.PRETIX_REGISTRATION:
+    if not settings.PRETIX_REGISTRATION or 'native' not in get_auth_backends():
         raise PermissionDenied('Registration is disabled')
     ctx = {}
     if request.user.is_authenticated:
@@ -113,6 +137,9 @@ def invite(request, token):
     Registration form in case of an invite
     """
     ctx = {}
+
+    if 'native' not in get_auth_backends():
+        raise PermissionDenied('Invites are disabled')
 
     try:
         inv = TeamInvite.objects.get(token=token)
@@ -183,7 +210,7 @@ class Forgot(TemplateView):
     template_name = 'pretixcontrol/auth/forgot.html'
 
     def dispatch(self, request, *args, **kwargs):
-        if not settings.PRETIX_PASSWORD_RESET:
+        if not settings.PRETIX_PASSWORD_RESET or 'native' not in get_auth_backends():
             raise PermissionDenied('Password reset is disabled')
         return super().dispatch(request, *args, **kwargs)
 
@@ -255,15 +282,15 @@ class Recover(TemplateView):
     }
 
     def dispatch(self, request, *args, **kwargs):
-        if not settings.PRETIX_PASSWORD_RESET:
-            raise PermissionDenied('Password reset is disabled')
+        if not settings.PRETIX_PASSWORD_RESET or 'native' not in get_auth_backends():
+            raise PermissionDenied('Registration is disabled')
         return super().dispatch(request, *args, **kwargs)
 
     def get(self, request, *args, **kwargs):
         if request.user.is_authenticated:
             return redirect(request.GET.get("next", 'control:index'))
         try:
-            user = User.objects.get(id=self.request.GET.get('id'))
+            user = User.objects.get(id=self.request.GET.get('id'), auth_backend='native')
         except User.DoesNotExist:
             return self.invalid('unknownuser')
         if not default_token_generator.check_token(user, self.request.GET.get('token')):
@@ -277,7 +304,7 @@ class Recover(TemplateView):
     def post(self, request, *args, **kwargs):
         if self.form.is_valid():
             try:
-                user = User.objects.get(id=self.request.GET.get('id'))
+                user = User.objects.get(id=self.request.GET.get('id'), auth_backend='native')
             except User.DoesNotExist:
                 return self.invalid('unknownuser')
             if not default_token_generator.check_token(user, self.request.GET.get('token')):
@@ -302,7 +329,7 @@ class Recover(TemplateView):
 
 
 def get_u2f_appid(request):
-    return '%s://%s' % ('https' if request.is_secure() else 'http', request.get_host())
+    return settings.SITE_URL
 
 
 class Login2FAView(TemplateView):
@@ -333,15 +360,41 @@ class Login2FAView(TemplateView):
         token = request.POST.get('token', '').strip().replace(' ', '')
 
         valid = False
-        if '_u2f_challenge' in self.request.session and token.startswith('{'):
-            devices = [DeviceRegistration.wrap(device.json_data)
-                       for device in U2FDevice.objects.filter(confirmed=True, user=self.user)]
-            challenge = self.request.session.pop('_u2f_challenge')
+        if 'webauthn_challenge' in self.request.session and token.startswith('{'):
+            challenge = self.request.session['webauthn_challenge']
+
+            resp = json.loads(self.request.POST.get("token"))
             try:
-                u2f.verify_authenticate(devices, challenge, token, [self.app_id])
-                valid = True
-            except Exception:
-                logger.exception('U2F login failed')
+                devices = [WebAuthnDevice.objects.get(user=self.user, credential_id=resp.get("id"))]
+            except WebAuthnDevice.DoesNotExist:
+                devices = U2FDevice.objects.filter(user=self.user)
+
+            for d in devices:
+                try:
+                    wu = d.webauthnuser
+
+                    if isinstance(d, U2FDevice):
+                        # RP_ID needs to be appId for U2F devices, but we can't
+                        # set it that way in U2FDevice.webauthnuser, since that
+                        # breaks the frontend part.
+                        wu.rp_id = settings.SITE_URL
+
+                    webauthn_assertion_response = webauthn.WebAuthnAssertionResponse(
+                        wu,
+                        resp,
+                        challenge,
+                        settings.SITE_URL,
+                        uv_required=False  # User Verification
+                    )
+                    sign_count = webauthn_assertion_response.verify()
+                except Exception:
+                    logger.exception('U2F login failed')
+                else:
+                    if isinstance(d, WebAuthnDevice):
+                        d.sign_count = sign_count
+                        d.save()
+                    valid = True
+                    break
         else:
             valid = match_token(self.user, token)
 
@@ -359,18 +412,25 @@ class Login2FAView(TemplateView):
 
     def get_context_data(self, **kwargs):
         ctx = super().get_context_data()
-
-        devices = [DeviceRegistration.wrap(device.json_data)
-                   for device in U2FDevice.objects.filter(confirmed=True, user=self.user)]
+        if 'webauthn_challenge' in self.request.session:
+            del self.request.session['webauthn_challenge']
+        challenge = generate_challenge(32)
+        self.request.session['webauthn_challenge'] = challenge
+        devices = [
+            device.webauthnuser for device in WebAuthnDevice.objects.filter(confirmed=True, user=self.user)
+        ] + [
+            device.webauthnuser for device in U2FDevice.objects.filter(confirmed=True, user=self.user)
+        ]
         if devices:
-            challenge = u2f.start_authenticate(devices, challenge=rand_bytes(32))
-            self.request.session['_u2f_challenge'] = challenge.json
-            ctx['jsondata'] = challenge.json
-        else:
-            if '_u2f_challenge' in self.request.session:
-                del self.request.session['_u2f_challenge']
-            ctx['jsondata'] = None
-
+            webauthn_assertion_options = webauthn.WebAuthnAssertionOptions(
+                devices,
+                challenge
+            )
+            ad = webauthn_assertion_options.assertion_dict
+            ad['extensions'] = {
+                'appid': get_u2f_appid(self.request)
+            }
+            ctx['jsondata'] = json.dumps(ad)
         return ctx
 
     def get(self, request, *args, **kwargs):

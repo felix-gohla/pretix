@@ -6,6 +6,7 @@ from decimal import Decimal
 import pytest
 from django.core.files.base import ContentFile
 from django.utils.timezone import now
+from django_scopes import scope
 
 from pretix.base.models import (
     CachedCombinedTicket, CachedTicket, Event, InvoiceAddress, Order,
@@ -27,7 +28,8 @@ def event():
         organizer=o, name='Dummy', slug='dummy',
         date_from=now(), plugins='pretix.plugins.banktransfer,pretix.plugins.ticketoutputpdf'
     )
-    return event
+    with scope(organizer=o):
+        yield event
 
 
 @pytest.fixture
@@ -169,6 +171,7 @@ def test_invoice_address_shredder(event, order):
         data={
             "data": [{"attendee_name": "Hans", "question_1": "Test"}],
             "invoice_data": {"name": "Peter", "country": "DE", "is_business": False, "internal_reference": "",
+                             "state": "",
                              "company": "ACME", "street": "Sesam Street", "city": "Sample City", "zipcode": "12345"}
         }
     )
@@ -187,6 +190,7 @@ def test_invoice_address_shredder(event, order):
             'last_modified': ia.last_modified.isoformat().replace('+00:00', 'Z'),
             'name': '',
             'name_parts': {},
+            'state': '',
             'street': '221B Baker Street',
             'vat_id': '',
             'vat_id_validated': False,
@@ -200,7 +204,7 @@ def test_invoice_address_shredder(event, order):
     assert l1.parsed_data == {
         "data": [{"attendee_name": "Hans", "question_1": "Test"}],
         "invoice_data": {"name": "█", "country": "█", "is_business": False, "internal_reference": "", "company": "█",
-                         "street": "█", "city": "█", "zipcode": "█"}
+                         "street": "█", "city": "█", "zipcode": "█", "state": ""}
     }
 
 
@@ -256,7 +260,7 @@ def test_invoice_shredder(event, order):
     inv = generate_invoice(order)
     invoice_pdf_task.apply(args=(inv.pk,))
     inv.refresh_from_db()
-    assert inv.invoice_to == "Acme Company\n\n221B Baker Street\n12345 London"
+    assert inv.invoice_to == "Acme Company\n221B Baker Street\n12345 London"
     assert inv.file
     fname = inv.file.path
     assert os.path.exists(fname)

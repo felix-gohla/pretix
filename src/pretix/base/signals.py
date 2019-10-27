@@ -139,6 +139,24 @@ class EventPluginSignal(django.dispatch.Signal):
         return sorted_list
 
 
+class GlobalSignal(django.dispatch.Signal):
+    def send_chained(self, sender: Event, chain_kwarg_name, **named) -> List[Tuple[Callable, Any]]:
+        """
+        Send signal from sender to all connected receivers. The return value of the first receiver
+        will be used as the keyword argument specified by ``chain_kwarg_name`` in the input to the
+        second receiver and so on. The return value of the last receiver is returned by this method.
+
+        """
+        response = named.get(chain_kwarg_name)
+        if not self.receivers or self.sender_receivers_cache.get(sender) is NO_RECEIVERS:
+            return response
+
+        for receiver in self._live_receivers(sender):
+            named[chain_kwarg_name] = response
+            response = receiver(signal=self, sender=sender, **named)
+        return response
+
+
 class DeprecatedSignal(django.dispatch.Signal):
 
     def connect(self, receiver, sender=None, weak=True, dispatch_uid=None):
@@ -164,6 +182,16 @@ register_payment_providers = EventPluginSignal(
 """
 This signal is sent out to get all known payment providers. Receivers should return a
 subclass of pretix.base.payment.BasePaymentProvider or a list of these
+
+As with all event-plugin signals, the ``sender`` keyword argument will contain the event.
+"""
+
+register_mail_placeholders = EventPluginSignal(
+    providing_args=[]
+)
+"""
+This signal is sent out to get all known email text placeholders. Receivers should return
+an instance of a subclass of pretix.base.email.BaseMailTextPlaceholder or a list of these.
 
 As with all event-plugin signals, the ``sender`` keyword argument will contain the event.
 """
@@ -240,12 +268,40 @@ subclass of pretix.base.exporter.BaseExporter
 As with all event-plugin signals, the ``sender`` keyword argument will contain the event.
 """
 
+validate_order = EventPluginSignal(
+    providing_args=["payment_provider", "positions", "email", "locale", "invoice_address",
+                    "meta_info"]
+)
+"""
+This signal is sent out when the user tries to confirm the order, before we actually create
+the order. It allows you to inspect the cart positions. Your return value will be ignored,
+but you can raise an OrderError with an appropriate exception message if you like to block
+the order. We strongly discourage making changes to the order here.
+
+As with all event-plugin signals, the ``sender`` keyword argument will contain the event.
+"""
+
 validate_cart = EventPluginSignal(
     providing_args=["positions"]
 )
 """
 This signal is sent out before the user starts checkout. It includes an iterable
 with the current CartPosition objects.
+The response of receivers will be ignored, but you can raise a CartError with an
+appropriate exception message.
+
+As with all event-plugin signals, the ``sender`` keyword argument will contain the event.
+"""
+
+validate_cart_addons = EventPluginSignal(
+    providing_args=["addons", "base_position", "iao"]
+)
+"""
+This signal is sent when a user tries to select a combination of addons. In contrast to
+ ``validate_cart``, this is executed before the cart is actually modified. You are passed
+an argument ``addons`` containing a set of ``(item, variation or None)`` tuples as well
+as the ``ItemAddOn`` object as the argument ``iao`` and the base cart position as
+``base_position``.
 The response of receivers will be ignored, but you can raise a CartError with an
 appropriate exception message.
 
@@ -271,6 +327,80 @@ order_paid = EventPluginSignal(
 This signal is sent out every time an order is paid. The order object is given
 as the first argument. This signal is *not* sent out if an order is marked as paid
 because an already-paid order has been split.
+
+As with all event-plugin signals, the ``sender`` keyword argument will contain the event.
+"""
+
+order_canceled = EventPluginSignal(
+    providing_args=["order"]
+)
+"""
+This signal is sent out every time an order is canceled. The order object is given
+as the first argument.
+
+As with all event-plugin signals, the ``sender`` keyword argument will contain the event.
+"""
+
+order_expired = EventPluginSignal(
+    providing_args=["order"]
+)
+"""
+This signal is sent out every time an order is marked as expired. The order object is given
+as the first argument.
+
+As with all event-plugin signals, the ``sender`` keyword argument will contain the event.
+"""
+
+order_modified = EventPluginSignal(
+    providing_args=["order"]
+)
+"""
+This signal is sent out every time an order's information is modified. The order object is given
+as the first argument.
+
+As with all event-plugin signals, the ``sender`` keyword argument will contain the event.
+"""
+
+order_changed = EventPluginSignal(
+    providing_args=["order"]
+)
+"""
+This signal is sent out every time an order's content is changed. The order object is given
+as the first argument.
+
+As with all event-plugin signals, the ``sender`` keyword argument will contain the event.
+"""
+
+order_approved = EventPluginSignal(
+    providing_args=["order"]
+)
+"""
+This signal is sent out every time an order is being approved. The order object is given
+as the first argument.
+
+As with all event-plugin signals, the ``sender`` keyword argument will contain the event.
+"""
+
+order_denied = EventPluginSignal(
+    providing_args=["order"]
+)
+"""
+This signal is sent out every time an order is being denied. The order object is given
+as the first argument.
+
+As with all event-plugin signals, the ``sender`` keyword argument will contain the event.
+"""
+
+order_gracefully_delete = EventPluginSignal(
+    providing_args=["order"]
+)
+"""
+This signal is sent out every time a test-mode order is being deleted. The order object
+is given as the first argument.
+
+Any plugin receiving this signals is supposed to perform any cleanup necessary at this
+point, so that the underlying order has no more external constraints that would inhibit
+the deletion of the order.
 
 As with all event-plugin signals, the ``sender`` keyword argument will contain the event.
 """
@@ -412,7 +542,7 @@ As with all event-plugin signals, the ``sender`` keyword argument will contain t
 """
 
 email_filter = EventPluginSignal(
-    providing_args=['message', 'order']
+    providing_args=['message', 'order', 'user']
 )
 """
 This signal allows you to implement a middleware-style filter on all outgoing emails. You are expected to
@@ -422,8 +552,24 @@ As with all event-plugin signals, the ``sender`` keyword argument will contain t
 The ``message`` argument will contain an ``EmailMultiAlternatives`` object.
 If the email is associated with a specific order, the ``order`` argument will be passed as well, otherwise
 it will be ``None``.
+If the email is associated with a specific user, e.g. a notification email, the ``user`` argument will be passed as
+well, otherwise it will be ``None``.
 """
 
+global_email_filter = GlobalSignal(
+    providing_args=['message', 'order', 'user']
+)
+"""
+This signal allows you to implement a middleware-style filter on all outgoing emails. You are expected to
+return a (possibly modified) copy of the message object passed to you.
+
+This signal is called on all events and even if there is no known event. ``sender`` is an event or None.
+The ``message`` argument will contain an ``EmailMultiAlternatives`` object.
+If the email is associated with a specific order, the ``order`` argument will be passed as well, otherwise
+it will be ``None``.
+If the email is associated with a specific user, e.g. a notification email, the ``user`` argument will be passed as
+well, otherwise it will be ``None``.
+"""
 
 layout_text_variables = EventPluginSignal()
 """
@@ -441,4 +587,38 @@ dictionaries as values that contain keys like in the following example::
 
 The evaluate member will be called with the order position, order and event as arguments. The event might
 also be a subevent, if applicable.
+"""
+
+
+timeline_events = EventPluginSignal()
+"""
+This signal is sent out to collect events for the time line shown on event dashboards. You are passed
+a ``subevent`` argument which might be none and you are expected to return a list of instances of
+``pretix.base.timeline.TimelineEvent``, which is a ``namedtuple`` with the fields ``event``, ``subevent``,
+``datetime``, ``description`` and ``edit_url``.
+"""
+
+
+quota_availability = EventPluginSignal(
+    providing_args=['quota', 'result', 'count_waitinglist']
+)
+"""
+This signal allows you to modify the availability of a quota. You are passed the ``quota`` and an
+``availability`` result calculated by pretix code or other plugins. ``availability`` is a tuple
+with the first entry being one of the ``Quota.AVAILABILITY_*`` constants and the second entry being
+the number of available tickets (or ``None`` for unlimited). You are expected to return a value
+of the same time. The parameter ``count_waitinglists`` specifies whether waiting lists should be taken
+into account.
+
+**Warning: Use this signal with great caution, it allows you to screw up the performance of the
+system really bad.** Also, keep in mind that your response is subject to caching and out-of-date
+quotas might be used for display (not for actual order processing).
+"""
+
+order_split = EventPluginSignal(
+    providing_args=["original", "split_order"]
+)
+"""
+This signal is sent out when an order is split into two orders and allows you to copy related models
+to the new order. You will be passed the old order as ``original`` and the new order as ``split_order``.
 """

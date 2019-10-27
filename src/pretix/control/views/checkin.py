@@ -1,7 +1,7 @@
 import dateutil.parser
 from django.contrib import messages
 from django.db import transaction
-from django.db.models import Max, OuterRef, Subquery
+from django.db.models import Exists, Max, OuterRef, Subquery
 from django.http import Http404, HttpResponseRedirect
 from django.shortcuts import get_object_or_404, redirect
 from django.urls import reverse
@@ -11,6 +11,7 @@ from django.utils.translation import ugettext_lazy as _
 from django.views.generic import DeleteView, ListView
 from pytz import UTC
 
+from pretix.base.channels import get_all_sales_channels
 from pretix.base.models import Checkin, Order, OrderPosition
 from pretix.base.models.checkin import CheckinList
 from pretix.control.forms.checkin import CheckinListForm
@@ -38,7 +39,10 @@ class CheckInListShow(EventPermissionRequiredMixin, PaginationMixin, ListView):
             order__status__in=[Order.STATUS_PAID, Order.STATUS_PENDING] if self.list.include_pending else [Order.STATUS_PAID],
             subevent=self.list.subevent
         ).annotate(
-            last_checked_in=Subquery(cqs)
+            last_checked_in=Subquery(cqs),
+            auto_checked_in=Exists(
+                Checkin.objects.filter(position_id=OuterRef('pk'), list_id=self.list.pk, auto_checked_in=True)
+            )
         ).select_related('item', 'variation', 'order', 'addon_to')
 
         if not self.list.all_products:
@@ -100,6 +104,7 @@ class CheckInListShow(EventPermissionRequiredMixin, PaginationMixin, ListView):
                         'list': self.list.pk,
                         'web': True
                     }, user=request.user)
+                    op.order.touch()
 
             messages.success(request, _('The selected check-ins have been reverted.'))
         else:
@@ -145,21 +150,20 @@ class CheckinListList(EventPermissionRequiredMixin, PaginationMixin, ListView):
     def get_context_data(self, **kwargs):
         ctx = super().get_context_data(**kwargs)
         clists = list(ctx['checkinlists'])
+        sales_channels = get_all_sales_channels()
 
-        # Optimization: Fetch expensive columns for this page only
-        annotations = {
-            a['pk']: a
-            for a in CheckinList.annotate_with_numbers(CheckinList.objects.filter(pk__in=[l.pk for l in clists]), self.request.event).values(
-                'pk', 'checkin_count', 'position_count', 'percent'
-            )
-        }
         for cl in clists:
             if cl.subevent:
                 cl.subevent.event = self.request.event  # re-use same event object to make sure settings are cached
-            cl.checkin_count = annotations.get(cl.pk, {}).get('checkin_count', 0)
-            cl.position_count = annotations.get(cl.pk, {}).get('position_count', 0)
-            cl.percent = annotations.get(cl.pk, {}).get('percent', 0)
+            cl.auto_checkin_sales_channels = [sales_channels[channel] for channel in cl.auto_checkin_sales_channels]
         ctx['checkinlists'] = clists
+
+        ctx['can_change_organizer_settings'] = self.request.user.has_organizer_permission(
+            self.request.organizer,
+            'can_change_organizer_settings',
+            self.request
+        )
+
         return ctx
 
 
@@ -247,7 +251,7 @@ class CheckinListDelete(EventPermissionRequiredMixin, DeleteView):
         self.object = self.get_object()
         success_url = self.get_success_url()
         self.object.checkins.all().delete()
-        self.object.log_action(action='pretix.event.orders.deleted', user=request.user)
+        self.object.log_action(action='pretix.event.checkinlists.deleted', user=request.user)
         self.object.delete()
         messages.success(self.request, _('The selected list has been deleted.'))
         return HttpResponseRedirect(success_url)

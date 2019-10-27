@@ -1,6 +1,7 @@
 import string
 from decimal import Decimal
 
+import pycountry
 from django.db import DatabaseError, models, transaction
 from django.db.models import Max
 from django.db.models.functions import Cast
@@ -9,6 +10,9 @@ from django.utils.crypto import get_random_string
 from django.utils.functional import cached_property
 from django.utils.translation import pgettext
 from django_countries.fields import CountryField
+from django_scopes import ScopedManager
+
+from pretix.base.settings import COUNTRIES_WITH_STATE_IN_ADDRESS
 
 
 def invoice_filename(instance, filename: str) -> str:
@@ -89,6 +93,7 @@ class Invoice(models.Model):
     invoice_to_street = models.TextField(null=True)
     invoice_to_zipcode = models.CharField(max_length=190, null=True)
     invoice_to_city = models.TextField(null=True)
+    invoice_to_state = models.CharField(max_length=190, null=True)
     invoice_to_country = CountryField(null=True)
     invoice_to_vat_id = models.TextField(null=True)
     invoice_to_beneficiary = models.TextField(null=True)
@@ -107,6 +112,8 @@ class Invoice(models.Model):
     file = models.FileField(null=True, blank=True, upload_to=invoice_filename, max_length=255)
     internal_reference = models.TextField(blank=True)
 
+    objects = ScopedManager(organizer='event__organizer')
+
     @staticmethod
     def _to_numeric_invoice_number(number):
         return '{:05d}'.format(int(number))
@@ -117,9 +124,42 @@ class Invoice(models.Model):
             self.invoice_from_name,
             self.invoice_from,
             (self.invoice_from_zipcode or "") + " " + (self.invoice_from_city or ""),
-            str(self.invoice_from_country),
+            self.invoice_from_country.name if self.invoice_from_country else "",
             pgettext("invoice", "VAT-ID: %s") % self.invoice_from_vat_id if self.invoice_from_vat_id else "",
             pgettext("invoice", "Tax ID: %s") % self.invoice_from_tax_id if self.invoice_from_tax_id else "",
+        ]
+        return '\n'.join([p.strip() for p in parts if p and p.strip()])
+
+    @property
+    def address_invoice_from(self):
+        parts = [
+            self.invoice_from_name,
+            self.invoice_from,
+            (self.invoice_from_zipcode or "") + " " + (self.invoice_from_city or ""),
+            self.invoice_from_country.name if self.invoice_from_country else "",
+        ]
+        return '\n'.join([p.strip() for p in parts if p and p.strip()])
+
+    @property
+    def address_invoice_to(self):
+        if self.invoice_to and not self.invoice_to_company and not self.invoice_to_name:
+            return self.invoice_to
+
+        state_name = ""
+        if self.invoice_to_state:
+            state_name = self.invoice_to_state
+            if str(self.invoice_to_country) in COUNTRIES_WITH_STATE_IN_ADDRESS:
+                if COUNTRIES_WITH_STATE_IN_ADDRESS[str(self.invoice_to_country)][1] == 'long':
+                    state_name = pycountry.subdivisions.get(
+                        code='{}-{}'.format(self.invoice_to_country, self.invoice_to_state)
+                    ).name
+
+        parts = [
+            self.invoice_to_company,
+            self.invoice_to_name,
+            self.invoice_to_street,
+            ((self.invoice_to_zipcode or "") + " " + (self.invoice_to_city or "") + " " + (state_name or "")).strip(),
+            self.invoice_to_country.name if self.invoice_to_country else "",
         ]
         return '\n'.join([p.strip() for p in parts if p and p.strip()])
 
@@ -149,6 +189,8 @@ class Invoice(models.Model):
             self.organizer = self.order.event.organizer
         if not self.prefix:
             self.prefix = self.event.settings.invoice_numbers_prefix or (self.event.slug.upper() + '-')
+            if self.is_cancellation:
+                self.prefix = self.event.settings.invoice_numbers_prefix_cancellations or self.prefix
         if not self.invoice_no:
             if self.order.testmode:
                 self.prefix += 'TEST-'

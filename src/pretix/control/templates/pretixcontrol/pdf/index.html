@@ -8,7 +8,7 @@
     {% compress css %}
         <link type="text/css" rel="stylesheet" href="{% static "pretixcontrol/scss/pdfeditor.css" %}">
     {% endcompress %}
-    <link type="text/css" rel="stylesheet" href="{% url "control:pdf.css" organizer=request.organizer.slug event=request.event.slug %}">
+    <link type="text/css" rel="stylesheet" href="{% url "control:pdf.css" %}">
 {% endblock %}
 {% block content %}
     <h1>
@@ -25,7 +25,7 @@
         <div class="col-md-9">
             <div class="panel panel-default">
                 <div class="panel-heading">
-                    <div class="pull-right">
+                    <div class="pull-right flip">
                         <div class="btn-group">
                             <button type="button" class="btn btn-default btn-xs" id="toolbox-source"
                                     title="{% trans "Code" %}">
@@ -70,7 +70,7 @@
                             <p>
                                 <textarea id="source-textarea" class="form-control"></textarea>
                             </p>
-                            <p class="text-right">
+                            <p class="text-right flip">
                                 <button class="btn btn-default" id="source-close">
                                     {% trans "Cancel" %}
                                 </button>
@@ -151,7 +151,7 @@
         <div class="col-md-3" id="editor-toolbox-area">
             <div class="panel panel-default" id="toolbox">
                 <div class="panel-heading">
-                    <div class="pull-right object-buttons">
+                    <div class="pull-right object-buttons flip">
                         <div class="btn-group">
                             <button type="button" class="btn btn-default btn-xs" id="toolbox-cut"
                                     title="{% trans "Cut" %}">
@@ -175,21 +175,32 @@
                     <div class="row control-group pdf-info">
                         <div class="col-sm-6">
                             <label>{% trans "Width (mm)" %}</label><br>
-                            <input type="number" id="pdf-info-width" class="input-block-level form-control" disabled>
+                            <input type="number" id="pdf-info-width" class="input-block-level form-control">
                         </div>
                         <div class="col-sm-6">
                             <label>{% trans "Height (mm)" %}</label><br>
-                            <input type="number" id="pdf-info-height" class="input-block-level form-control" disabled>
+                            <input type="number" id="pdf-info-height" class="input-block-level form-control">
                         </div>
                     </div>
                     <div class="row control-group pdf-info">
                         <div class="col-sm-12">
                             <label>{% trans "Background PDF" %}</label><br>
-                            <span class="btn btn-default fileinput-button">
+                            <p>
+                                <button class="btn btn-default background-button" id="pdf-empty">
+                                    {% trans "Create empty background" %}
+                                </button>
+                            </p>
+                            <span class="btn btn-default fileinput-button background-button">
                                 <i class="fa fa-upload"></i>
-                                <span>{% trans "Upload new background" %}</span>
+                                <span>{% trans "Upload custom background" %}</span>
                                 <input id="fileupload" type="file" name="background">
                             </span>
+                        </div>
+                        <div class="col-sm-12 help-inline">
+                            <p>
+                                After you changed the page size, you need to create a new empty background. If you
+                                want to use a custom background, it already needs to have the correct size.
+                            </p>
                         </div>
                     </div>
                     <div class="row control-group position">

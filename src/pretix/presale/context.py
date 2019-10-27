@@ -1,6 +1,7 @@
 from django.conf import settings
 from django.core.files.storage import default_storage
 from django.utils.translation import get_language_info
+from django_scopes import get_scope
 from i18nfield.strings import LazyI18nString
 
 from pretix.base.settings import GlobalSettingsObject
@@ -8,7 +9,7 @@ from pretix.helpers.i18n import (
     get_javascript_format_without_seconds, get_moment_locale,
 )
 
-from .signals import footer_link, html_footer, html_head
+from .signals import footer_link, html_footer, html_head, html_page_header
 
 
 def contextprocessor(request):
@@ -23,6 +24,7 @@ def contextprocessor(request):
         'DEBUG': settings.DEBUG,
     }
     _html_head = []
+    _html_page_header = []
     _html_foot = []
     _footer = []
 
@@ -42,9 +44,11 @@ def contextprocessor(request):
         else:
             ctx['footer_text'] = str(text)
 
-    if hasattr(request, 'event'):
+    if hasattr(request, 'event') and get_scope():
         for receiver, response in html_head.send(request.event, request=request):
             _html_head.append(response)
+        for receiver, response in html_page_header.send(request.event, request=request):
+            _html_page_header.append(response)
         for receiver, response in html_footer.send(request.event, request=request):
             _html_foot.append(response)
         for receiver, response in footer_link.send(request.event, request=request):
@@ -61,6 +65,8 @@ def contextprocessor(request):
 
         if request.resolver_match:
             ctx['cart_namespace'] = request.resolver_match.kwargs.get('cart_namespace', '')
+    elif hasattr(request, 'organizer'):
+        ctx['languages'] = [get_language_info(code) for code in request.organizer.settings.locales]
 
     if hasattr(request, 'organizer'):
         if request.organizer.settings.presale_css_file and not hasattr(request, 'event'):
@@ -71,6 +77,7 @@ def contextprocessor(request):
 
     ctx['html_head'] = "".join(_html_head)
     ctx['html_foot'] = "".join(_html_foot)
+    ctx['html_page_header'] = "".join(_html_page_header)
     ctx['footer'] = _footer
     ctx['site_url'] = settings.SITE_URL
 

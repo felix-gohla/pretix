@@ -66,7 +66,7 @@
                     <li class="list-group-item logentry">
                         <p>
                             <a href="{% url "control:event.requiredaction.discard" event=request.event.slug organizer=request.event.organizer.slug id=action.id %}"
-                               class="btn btn-default btn-xs pull-right">
+                               class="btn btn-default btn-xs pull-right flip">
                                 {% trans "Hide message" %}
                             </a>
                             <small><span
@@ -90,20 +90,35 @@
             {% include "pretixcontrol/event/fragment_subevent_choice_simple.html" %}
         </form>
     {% endif %}
+    {% if not request.event.has_subevents or subevent %}
+        {% include "pretixcontrol/event/fragment_timeline.html" %}
+    {% endif %}
     <div class="dashboard">
         {% for w in widgets %}
-            <div class="widget-container widget-{{ w.display_size|default:"small" }}">
+            <div class="widget-container widget-{{ w.display_size|default:"small" }} {% if w.lazy %}widget-lazy-loading{% endif %}" data-lazy-id="{{ w.lazy }}">
                 {% if w.url %}{# backwards compatibility #}
                     <a href="{{ w.url }}" class="widget">
-                        {{ w.content|safe }}
+                        {% if w.lazy %}
+                            <span class="fa fa-cog fa-4x"></span>
+                        {% else %}
+                            {{ w.content|safe }}
+                        {% endif %}
                     </a>
                 {% elif w.link %}
                     <a href="{{ w.link }}" class="widget">
-                        {{ w.content|safe }}
+                        {% if w.lazy %}
+                            <span class="fa fa-cog fa-4x´"></span>
+                        {% else %}
+                            {{ w.content|safe }}
+                        {% endif %}
                     </a>
                 {% else %}
                     <div class="widget">
-                        {{ w.content|safe }}
+                        {% if w.lazy %}
+                            <span class="fa fa-cog fa-4x"></span>
+                        {% else %}
+                            {{ w.content|safe }}
+                        {% endif %}
                     </div>
                 {% endif %}
             </div>
@@ -124,7 +139,7 @@
                 <div class="row">
                     {% bootstrap_field comment_form.comment layout="horizontal" show_help=True show_label=False horizontal_field_class="col-md-12" %}
                 </div>
-                <p class="text-right">
+                <p class="text-right flip">
                     <br>
                     <button class="btn btn-default">
                         {% trans "Update comment" %}

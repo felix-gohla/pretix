@@ -1,3 +1,9 @@
+.. spelling::
+
+   geo
+   lat
+   lon
+
 Events
 ======
 
@@ -25,11 +31,17 @@ is_public                             boolean                    If ``true``, th
 presale_start                         datetime                   The date at which the ticket shop opens (or ``null``)
 presale_end                           datetime                   The date at which the ticket shop closes (or ``null``)
 location                              multi-lingual string       The event location (or ``null``)
-has_subevents                         boolean                    ``True`` if the event series feature is active for this
+geo_lat                               float                      Latitude of the location (or ``null``)
+geo_lon                               float                      Longitude of the location (or ``null``)
+has_subevents                         boolean                    ``true`` if the event series feature is active for this
                                                                  event. Cannot change after event is created.
-meta_data                             dict                       Values set for organizer-specific meta data parameters.
+meta_data                             object                     Values set for organizer-specific meta data parameters.
 plugins                               list                       A list of package names of the enabled plugins for this
                                                                  event.
+seating_plan                          integer                    If reserved seating is in use, the ID of a seating
+                                                                 plan. Otherwise ``null``.
+seat_category_mapping                 object                     An object mapping categories of the seating plan
+                                                                 (strings) to items in the event (integers or ``null``).
 ===================================== ========================== =======================================================
 
 
@@ -50,8 +62,24 @@ plugins                               list                       A list of packa
 
    The ``testmode`` attribute has been added.
 
+.. versionchanged:: 2.8
+
+    When cloning events, the ``testmode`` attribute will now be cloned, too.
+
+.. versionchanged:: 3.0
+
+   The attributes ``seating_plan`` and ``seat_category_mapping`` have been added.
+
+.. versionchanged:: 3.3
+
+   The attributes ``geo_lat`` and ``geo_lon`` have been added.
+
 Endpoints
 ---------
+
+.. versionchanged:: 3.3
+
+    The events resource can now be filtered by meta data attributes.
 
 .. http:get:: /api/v1/organizers/(organizer)/events/
 
@@ -93,8 +121,12 @@ Endpoints
             "presale_start": null,
             "presale_end": null,
             "location": null,
+            "geo_lat": null,
+            "geo_lon": null,
             "has_subevents": false,
             "meta_data": {},
+            "seating_plan": null,
+            "seat_category_mapping": {},
             "plugins": [
               "pretix.plugins.banktransfer"
               "pretix.plugins.stripe"
@@ -112,6 +144,13 @@ Endpoints
    :query is_future: If set to ``true`` (``false``), only events that happen currently or in the future are (not) returned. Event series are never (always) returned.
    :query is_past: If set to ``true`` (``false``), only events that are over are (not) returned. Event series are never (always) returned.
    :query ends_after: If set to a date and time, only events that happen during of after the given time are returned. Event series are never returned.
+   :query string ordering: Manually set the ordering of results. Valid fields to be used are ``date_from`` and
+                           ``slug``. Keep in mind that ``date_from`` of event series does not really tell you anything.
+                           Default: ``slug``.
+   :query array attr[meta_data_key]: By providing the key and value of a meta data attribute, the list of events will
+        only contain the events matching the set criteria. Providing ``?attr[Format]=Seminar`` would return only those
+        events having set their ``Format`` meta data to ``Seminar``, ``?attr[Format]=`` only those, that have no value
+        set. Please note that this filter will respect default values set on organizer level.
    :param organizer: The ``slug`` field of a valid organizer
    :statuscode 200: no error
    :statuscode 401: Authentication failure
@@ -152,7 +191,11 @@ Endpoints
         "presale_start": null,
         "presale_end": null,
         "location": null,
+        "geo_lat": null,
+        "geo_lon": null,
         "has_subevents": false,
+        "seating_plan": null,
+        "seat_category_mapping": {},
         "meta_data": {},
         "plugins": [
           "pretix.plugins.banktransfer"
@@ -184,7 +227,7 @@ Endpoints
       POST /api/v1/organizers/bigevents/events/ HTTP/1.1
       Host: pretix.eu
       Accept: application/json, text/javascript
-      Content: application/json
+      Content-Type: application/json
 
       {
         "name": {"en": "Sample Conference"},
@@ -198,7 +241,11 @@ Endpoints
         "is_public": false,
         "presale_start": null,
         "presale_end": null,
+        "seating_plan": null,
+        "seat_category_mapping": {},
         "location": null,
+        "geo_lat": null,
+        "geo_lon": null,
         "has_subevents": false,
         "meta_data": {},
         "plugins": [
@@ -228,6 +275,10 @@ Endpoints
         "presale_start": null,
         "presale_end": null,
         "location": null,
+        "geo_lat": null,
+        "geo_lon": null,
+        "seating_plan": null,
+        "seat_category_mapping": {},
         "has_subevents": false,
         "meta_data": {},
         "plugins": [
@@ -246,7 +297,7 @@ Endpoints
 .. http:post:: /api/v1/organizers/(organizer)/events/(event)/clone/
 
    Creates a new event with properties as set in the request body. The properties that are copied are: 'is_public',
-   settings, plugin settings, items, variations, add-ons, quotas, categories, tax rules, questions.
+   `testmode`, settings, plugin settings, items, variations, add-ons, quotas, categories, tax rules, questions.
 
    If the 'plugins' and/or 'is_public' fields are present in the post body this will determine their value. Otherwise
    their value will be copied from the existing event.
@@ -262,7 +313,7 @@ Endpoints
       POST /api/v1/organizers/bigevents/events/sampleconf/clone/ HTTP/1.1
       Host: pretix.eu
       Accept: application/json, text/javascript
-      Content: application/json
+      Content-Type: application/json
 
       {
         "name": {"en": "Sample Conference"},
@@ -277,6 +328,10 @@ Endpoints
         "presale_start": null,
         "presale_end": null,
         "location": null,
+        "geo_lat": null,
+        "geo_lon": null,
+        "seating_plan": null,
+        "seat_category_mapping": {},
         "has_subevents": false,
         "meta_data": {},
         "plugins": [
@@ -306,7 +361,11 @@ Endpoints
         "presale_start": null,
         "presale_end": null,
         "location": null,
+        "geo_lat": null,
+        "geo_lon": null,
         "has_subevents": false,
+        "seating_plan": null,
+        "seat_category_mapping": {},
         "meta_data": {},
         "plugins": [
           "pretix.plugins.stripe",
@@ -335,7 +394,7 @@ Endpoints
       PATCH /api/v1/organizers/bigevents/events/sampleconf/ HTTP/1.1
       Host: pretix.eu
       Accept: application/json, text/javascript
-      Content: application/json
+      Content-Type: application/json
 
       {
         "plugins": [
@@ -367,7 +426,11 @@ Endpoints
         "presale_start": null,
         "presale_end": null,
         "location": null,
+        "geo_lat": null,
+        "geo_lon": null,
         "has_subevents": false,
+        "seating_plan": null,
+        "seat_category_mapping": {},
         "meta_data": {},
         "plugins": [
           "pretix.plugins.banktransfer",
@@ -379,7 +442,7 @@ Endpoints
 
    :param organizer: The ``slug`` field of the organizer of the event to update
    :param event: The ``slug`` field of the event to update
-   :statuscode 201: no error
+   :statuscode 200: no error
    :statuscode 400: The event could not be created due to invalid submitted data.
    :statuscode 401: Authentication failure
    :statuscode 403: The requested organizer/event does not exist **or** you have no permission to create this resource.

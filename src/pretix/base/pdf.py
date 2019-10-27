@@ -32,7 +32,7 @@ from reportlab.pdfgen.canvas import Canvas
 from reportlab.platypus import Paragraph
 
 from pretix.base.invoice import ThumbnailingImageReader
-from pretix.base.models import Order, OrderPosition, QuestionAnswer
+from pretix.base.models import Order, OrderPosition
 from pretix.base.settings import PERSON_NAME_SCHEMES
 from pretix.base.signals import layout_text_variables
 from pretix.base.templatetags.money import money_filter
@@ -87,6 +87,15 @@ DEFAULT_VARIABLES = OrderedDict((
         "editor_sample": _("123.45 EUR"),
         "evaluate": lambda op, order, event: money_filter(op.price, event.currency)
     }),
+    ("price_with_addons", {
+        "label": _("Price including add-ons"),
+        "editor_sample": _("123.45 EUR"),
+        "evaluate": lambda op, order, event: money_filter(op.price + sum(
+            p.price
+            for p in op.addons.all()
+            if not p.canceled
+        ), event.currency)
+    }),
     ("attendee_name", {
         "label": _("Attendee name"),
         "editor_sample": _("John Doe"),
@@ -105,7 +114,7 @@ DEFAULT_VARIABLES = OrderedDict((
     ("event_date_range", {
         "label": _("Event date range"),
         "editor_sample": _("May 31st – June 4th, 2017"),
-        "evaluate": lambda op, order, ev: ev.get_date_range_display()
+        "evaluate": lambda op, order, ev: ev.get_date_range_display(force_show_end=True)
     }),
     ("event_begin", {
         "label": _("Event begin date and time"),
@@ -229,22 +238,56 @@ DEFAULT_VARIABLES = OrderedDict((
             "TIME_FORMAT"
         ) if ev.date_admission else ""
     }),
+    ("seat", {
+        "label": _("Seat: Full name"),
+        "editor_sample": _("Ground floor, Row 3, Seat 4"),
+        "evaluate": lambda op, order, ev: str(op.seat if op.seat else
+                                              _('General admission') if ev.seating_plan_id is not None else "")
+    }),
+    ("seat_zone", {
+        "label": _("Seat: zone"),
+        "editor_sample": _("Ground floor"),
+        "evaluate": lambda op, order, ev: str(op.seat.zone_name if op.seat else
+                                              _('General admission') if ev.seating_plan_id is not None else "")
+    }),
+    ("seat_row", {
+        "label": _("Seat: row"),
+        "editor_sample": "3",
+        "evaluate": lambda op, order, ev: str(op.seat.row_name if op.seat else "")
+    }),
+    ("seat_number", {
+        "label": _("Seat: seat number"),
+        "editor_sample": 4,
+        "evaluate": lambda op, order, ev: str(op.seat.seat_number if op.seat else "")
+    }),
 ))
 
 
 @receiver(layout_text_variables, dispatch_uid="pretix_base_layout_text_variables_questions")
 def variables_from_questions(sender, *args, **kwargs):
     def get_answer(op, order, event, question_id):
-        try:
-            if 'answers' in getattr(op, '_prefetched_objects_cache', {}):
-                a = [a for a in op.answers.all() if a.question_id == question_id][0]
+        a = None
+        if op.addon_to:
+            if 'answers' in getattr(op.addon_to, '_prefetched_objects_cache', {}):
+                try:
+                    a = [a for a in op.addon_to.answers.all() if a.question_id == question_id][0]
+                except IndexError:
+                    pass
             else:
-                a = op.answers.get(question_id=question_id)
+                a = op.addon_to.answers.filter(question_id=question_id).first()
+
+        if 'answers' in getattr(op, '_prefetched_objects_cache', {}):
+            try:
+                a = [a for a in op.answers.all() if a.question_id == question_id][0]
+            except IndexError:
+                pass
+        else:
+            a = op.answers.filter(question_id=question_id).first()
+
+        if not a:
+            return ""
+        else:
             return str(a).replace("\n", "<br/>\n")
-        except QuestionAnswer.DoesNotExist:
-            return ""
-        except IndexError:
-            return ""
 
     d = {}
     for q in sender.questions.all():

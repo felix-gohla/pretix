@@ -21,34 +21,38 @@ default_price                         money (string)             The item price 
                                                                  overwritten by variations or other options.
 category                              integer                    The ID of the category this item belongs to
                                                                  (or ``null``).
-active                                boolean                    If ``False``, the item is hidden from all public lists
+active                                boolean                    If ``false``, the item is hidden from all public lists
                                                                  and will not be sold.
 description                           multi-lingual string       A public description of the item. May contain Markdown
                                                                  syntax or can be ``null``.
-free_price                            boolean                    If ``True``, customers can change the price at which
+free_price                            boolean                    If ``true``, customers can change the price at which
                                                                  they buy the product (however, the price can't be set
                                                                  lower than the price defined by ``default_price`` or
                                                                  otherwise).
-tax_rate                              decimal (string)           The VAT rate to be applied for this item.
+tax_rate                              decimal (string)           The VAT rate to be applied for this item (read-only,
+                                                                 set through ``tax_rule``).
 tax_rule                              integer                    The internal ID of the applied tax rule (or ``null``).
-admission                             boolean                    ``True`` for items that grant admission to the event
-                                                                 (such as primary tickets) and ``False`` for others
+admission                             boolean                    ``true`` for items that grant admission to the event
+                                                                 (such as primary tickets) and ``false`` for others
                                                                  (such as add-ons or merchandise).
 position                              integer                    An integer, used for sorting
 picture                               string                     A product picture to be displayed in the shop
-                                                                 (read-only).
+                                                                 (read-only, can be ``null``).
 sales_channels                        list of strings            Sales channels this product is available on, such as
                                                                  ``"web"`` or ``"resellers"``. Defaults to ``["web"]``.
 available_from                        datetime                   The first date time at which this item can be bought
                                                                  (or ``null``).
 available_until                       datetime                   The last date time at which this item can be bought
                                                                  (or ``null``).
-require_voucher                       boolean                    If ``True``, this item can only be bought using a
+hidden_if_available                   integer                    The internal ID of a quota object, or ``null``. If
+                                                                 set, this item won't be shown publicly as long as this
+                                                                 quota is available.
+require_voucher                       boolean                    If ``true``, this item can only be bought using a
                                                                  voucher that is specifically assigned to this item.
-hide_without_voucher                  boolean                    If ``True``, this item is only shown during the voucher
+hide_without_voucher                  boolean                    If ``true``, this item is only shown during the voucher
                                                                  redemption process, but not in the normal shop
                                                                  frontend.
-allow_cancel                          boolean                    If ``False``, customers cannot cancel orders containing
+allow_cancel                          boolean                    If ``false``, customers cannot cancel orders containing
                                                                  this item.
 min_per_order                         integer                    This product can only be bought if it is included at
                                                                  least this many times in the order (or ``null`` for no
@@ -56,20 +60,26 @@ min_per_order                         integer                    This product ca
 max_per_order                         integer                    This product can only be bought if it is included at
                                                                  most this many times in the order (or ``null`` for no
                                                                  limitation).
-checkin_attention                     boolean                    If ``True``, the check-in app should show a warning
+checkin_attention                     boolean                    If ``true``, the check-in app should show a warning
                                                                  that this ticket requires special attention if such
                                                                  a product is being scanned.
 original_price                        money (string)             An original price, shown for comparison, not used
-                                                                 for price calculations.
-require_approval                      boolean                    If ``True``, orders with this product will need to be
+                                                                 for price calculations (or ``null``).
+require_approval                      boolean                    If ``true``, orders with this product will need to be
                                                                  approved by the event organizer before they can be
                                                                  paid.
-generate_tickets                      boolean                    If ``False``, tickets are never generated for this
-                                                                 product, regardless of other settings. If ``True``,
+require_bundling                      boolean                    If ``true``, this item is only available as part of bundles.
+generate_tickets                      boolean                    If ``false``, tickets are never generated for this
+                                                                 product, regardless of other settings. If ``true``,
                                                                  tickets are generated even if this is a
                                                                  non-admission or add-on product, regardless of event
                                                                  settings. If this is ``null``, regular ticketing
                                                                  rules apply.
+allow_waitinglist                     boolean                    If ``false``, no waiting list will be shown for this
+                                                                 product when it is sold out.
+issue_giftcard                        boolean                    If ``true``, buying this product will yield a gift card.
+show_quota_left                       boolean                    Publicly show how many tickets are still available.
+                                                                 If this is ``null``, the event default is used.
 has_variations                        boolean                    Shows whether or not this item has variations.
 variations                            list of objects            A list with one object for each variation of this item.
                                                                  Can be empty. Only writable during creation,
@@ -80,7 +90,9 @@ variations                            list of objects            A list with one
 ├ price                               money (string)             The price used for this variation. This is either the
                                                                  same as ``default_price`` if that value is set or equal
                                                                  to the item's ``default_price``.
-├ active                              boolean                    If ``False``, this variation will not be sold or shown.
+├ original_price                      money (string)             An original price, shown for comparison, not used
+                                                                 for price calculations (or ``null``).
+├ active                              boolean                    If ``false``, this variation will not be sold or shown.
 ├ description                         multi-lingual string       A public description of the variation. May contain
                                                                  Markdown syntax or can be ``null``.
 └ position                            integer                    An integer, used for sorting
@@ -91,9 +103,22 @@ addons                                list of objects            Definition of a
                                                                  chosen from.
 ├ min_count                           integer                    The minimal number of add-ons that need to be chosen.
 ├ max_count                           integer                    The maximal number of add-ons that can be chosen.
-└ position                            integer                    An integer, used for sorting
+├ position                            integer                    An integer, used for sorting
 └ price_included                      boolean                    Adding this add-on to the item is free
+bundles                               list of objects            Definition of bundles that are included in this item.
+                                                                 Only writable during creation,
+                                                                 use separate endpoint to modify this later.
+├ bundled_item                        integer                    Internal ID of the item that is included.
+├ bundled_variation                   integer                    Internal ID of the variation of the item (or ``null``).
+├ count                               integer                    Number of items included
+└ designated_price                    money (string)             Designated price of the bundled product. This will be
+                                                                 used to split the price of the base item e.g. for mixed
+                                                                 taxation. This is not added to the price.
 ===================================== ========================== =======================================================
+
+.. versionchanged:: 2.7
+
+   The attribute ``original_price`` has been added for ``variations``.
 
 .. versionchanged:: 1.7
 
@@ -121,15 +146,24 @@ addons                                list of objects            Definition of a
 
    The ``generate_tickets`` attribute has been added.
 
+.. versionchanged:: 2.6
+
+   The ``bundles`` and ``require_bundling`` attributes have been added.
+
+.. versionchanged:: 3.0
+
+   The ``show_quota_left``, ``allow_waitinglist``, and ``hidden_if_available`` attributes have been added.
+
 Notes
 -----
+
 Please note that an item either always has variations or never has. Once created with variations the item can never
 change to an item without and vice versa. To create an item with variations ensure that you POST an item with at least
 one variation.
 
-Also note that ``variations`` and ``addons`` are only supported on ``POST``. To update/delete variations and add-ons please
-use the dedicated nested endpoints. By design this endpoint does not support ``PATCH`` and ``PUT`` with nested
-``variations`` and/or ``addons``.
+Also note that ``variations``, ``bundles``, and  ``addons`` are only supported on ``POST``. To update/delete variations,
+bundles, and add-ons please use the dedicated nested endpoints. By design this endpoint does not support ``PATCH`` and ``PUT``
+with nested ``variations``, ``bundles`` and/or ``addons``.
 
 Endpoints
 ---------
@@ -173,10 +207,12 @@ Endpoints
             "tax_rate": "0.00",
             "tax_rule": 1,
             "admission": false,
+            "issue_giftcard": false,
             "position": 0,
             "picture": null,
             "available_from": null,
             "available_until": null,
+            "hidden_if_available": null,
             "require_voucher": false,
             "hide_without_voucher": false,
             "allow_cancel": true,
@@ -185,12 +221,16 @@ Endpoints
             "checkin_attention": false,
             "has_variations": false,
             "generate_tickets": null,
+            "allow_waitinglist": true,
+            "show_quota_left": null,
             "require_approval": false,
+            "require_bundling": false,
             "variations": [
               {
                  "value": {"en": "Student"},
                  "default_price": "10.00",
                  "price": "10.00",
+                 "original_price": null,
                  "active": true,
                  "description": null,
                  "position": 0
@@ -199,12 +239,14 @@ Endpoints
                  "value": {"en": "Regular"},
                  "default_price": null,
                  "price": "23.00",
+                 "original_price": null,
                  "active": true,
                  "description": null,
                  "position": 1
               }
             ],
-            "addons": []
+            "addons": [],
+            "bundles": []
           }
         ]
       }
@@ -260,24 +302,30 @@ Endpoints
         "tax_rate": "0.00",
         "tax_rule": 1,
         "admission": false,
+        "issue_giftcard": false,
         "position": 0,
         "picture": null,
         "available_from": null,
         "available_until": null,
+        "hidden_if_available": null,
         "require_voucher": false,
         "hide_without_voucher": false,
         "allow_cancel": true,
         "generate_tickets": null,
+        "allow_waitinglist": true,
+        "show_quota_left": null,
         "min_per_order": null,
         "max_per_order": null,
         "checkin_attention": false,
         "has_variations": false,
         "require_approval": false,
+        "require_bundling": false,
         "variations": [
           {
              "value": {"en": "Student"},
              "default_price": "10.00",
              "price": "10.00",
+             "original_price": null,
              "active": true,
              "description": null,
              "position": 0
@@ -286,12 +334,14 @@ Endpoints
              "value": {"en": "Regular"},
              "default_price": null,
              "price": "23.00",
+             "original_price": null,
              "active": true,
              "description": null,
              "position": 1
           }
         ],
-        "addons": []
+        "addons": [],
+        "bundles": []
       }
 
    :param organizer: The ``slug`` field of the organizer to fetch
@@ -312,7 +362,7 @@ Endpoints
       POST /api/v1/organizers/bigevents/events/sampleconf/items/ HTTP/1.1
       Host: pretix.eu
       Accept: application/json, text/javascript
-      Content: application/json
+      Content-Type: application/json
 
       {
         "id": 1,
@@ -328,23 +378,29 @@ Endpoints
         "tax_rate": "0.00",
         "tax_rule": 1,
         "admission": false,
+        "issue_giftcard": false,
         "position": 0,
         "picture": null,
         "available_from": null,
         "available_until": null,
+        "hidden_if_available": null,
         "require_voucher": false,
         "hide_without_voucher": false,
         "allow_cancel": true,
         "generate_tickets": null,
+        "allow_waitinglist": true,
+        "show_quota_left": null,
         "min_per_order": null,
         "max_per_order": null,
         "checkin_attention": false,
         "require_approval": false,
+        "require_bundling": false,
         "variations": [
           {
              "value": {"en": "Student"},
              "default_price": "10.00",
              "price": "10.00",
+             "original_price": null,
              "active": true,
              "description": null,
              "position": 0
@@ -353,12 +409,14 @@ Endpoints
              "value": {"en": "Regular"},
              "default_price": null,
              "price": "23.00",
+             "original_price": null,
              "active": true,
              "description": null,
              "position": 1
           }
         ],
-        "addons": []
+        "addons": [],
+        "bundles": []
       }
 
    **Example response**:
@@ -383,24 +441,30 @@ Endpoints
         "tax_rate": "0.00",
         "tax_rule": 1,
         "admission": false,
+        "issue_giftcard": false,
         "position": 0,
         "picture": null,
         "available_from": null,
         "available_until": null,
+        "hidden_if_available": null,
         "require_voucher": false,
         "hide_without_voucher": false,
         "allow_cancel": true,
         "min_per_order": null,
         "max_per_order": null,
         "generate_tickets": null,
+        "allow_waitinglist": true,
+        "show_quota_left": null,
         "checkin_attention": false,
         "has_variations": true,
         "require_approval": false,
+        "require_bundling": false,
         "variations": [
           {
              "value": {"en": "Student"},
              "default_price": "10.00",
              "price": "10.00",
+             "original_price": null,
              "active": true,
              "description": null,
              "position": 0
@@ -409,12 +473,14 @@ Endpoints
              "value": {"en": "Regular"},
              "default_price": null,
              "price": "23.00",
+             "original_price": null,
              "active": true,
              "description": null,
              "position": 1
           }
         ],
-        "addons": []
+        "addons": [],
+        "bundles": []
       }
 
    :param organizer: The ``slug`` field of the organizer of the event to create an item for
@@ -470,24 +536,30 @@ Endpoints
         "tax_rate": "0.00",
         "tax_rule": 1,
         "admission": false,
+        "issue_giftcard": false,
         "position": 0,
         "picture": null,
         "available_from": null,
         "available_until": null,
+        "hidden_if_available": null,
         "require_voucher": false,
         "hide_without_voucher": false,
         "generate_tickets": null,
+        "allow_waitinglist": true,
+        "show_quota_left": null,
         "allow_cancel": true,
         "min_per_order": null,
         "max_per_order": null,
         "checkin_attention": false,
         "has_variations": true,
         "require_approval": false,
+        "require_bundling": false,
         "variations": [
           {
              "value": {"en": "Student"},
              "default_price": "10.00",
              "price": "10.00",
+             "original_price": null,
              "active": true,
              "description": null,
              "position": 0
@@ -496,12 +568,14 @@ Endpoints
              "value": {"en": "Regular"},
              "default_price": null,
              "price": "23.00",
+             "original_price": null,
              "active": true,
              "description": null,
              "position": 1
           }
         ],
-        "addons": []
+        "addons": [],
+        "bundles": []
       }
 
    :param organizer: The ``slug`` field of the organizer to modify

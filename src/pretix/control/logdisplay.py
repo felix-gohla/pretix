@@ -19,7 +19,7 @@ from pretix.base.models import (
 from pretix.base.signals import logentry_display
 from pretix.base.templatetags.money import money_filter
 
-OVERVIEW_BLACKLIST = [
+OVERVIEW_BANLIST = [
     'pretix.plugins.sendmail.order.email.sent'
 ]
 
@@ -41,6 +41,12 @@ def _display_order_changed(event: Event, logentry: LogEntry):
             old_item=old_item, new_item=new_item,
             old_price=money_filter(Decimal(data['old_price']), event.currency),
             new_price=money_filter(Decimal(data['new_price']), event.currency),
+        )
+    elif logentry.action_type == 'pretix.event.order.changed.seat':
+        return text + ' ' + _('Position #{posid}: Seat "{old_seat}" changed '
+                              'to "{new_seat}".').format(
+            posid=data.get('positionid', '?'),
+            old_seat=data.get('old_seat'), new_seat=data.get('new_seat'),
         )
     elif logentry.action_type == 'pretix.event.order.changed.subevent':
         old_se = str(event.subevents.get(pk=data['old_subevent']))
@@ -189,6 +195,8 @@ def pretixcontrol_logentry_display(sender: Event, logentry: LogEntry, **kwargs):
         'pretix.event.order.payment.changed': _('A new payment {local_id} has been started instead of the previous one.'),
         'pretix.event.order.email.sent': _('An unidentified type email has been sent.'),
         'pretix.event.order.email.error': _('Sending of an email has failed.'),
+        'pretix.event.order.email.attachments.skipped': _('The email has been sent without attachments since they '
+                                                          'would have been too large to be likely to arrive.'),
         'pretix.event.order.email.custom_sent': _('A custom email has been sent.'),
         'pretix.event.order.email.download_reminder_sent': _('An email has been sent with a reminder that the ticket '
                                                              'is available for download.'),
@@ -249,9 +257,14 @@ def pretixcontrol_logentry_display(sender: Event, logentry: LogEntry, **kwargs):
         'pretix.event.item.addons.added': _('An add-on has been added to this product.'),
         'pretix.event.item.addons.removed': _('An add-on has been removed from this product.'),
         'pretix.event.item.addons.changed': _('An add-on has been changed on this product.'),
+        'pretix.event.item.bundles.added': _('A bundled item has been added to this product.'),
+        'pretix.event.item.bundles.removed': _('A bundled item has been removed from this product.'),
+        'pretix.event.item.bundles.changed': _('A bundled item has been changed on this product.'),
         'pretix.event.quota.added': _('The quota has been added.'),
         'pretix.event.quota.deleted': _('The quota has been deleted.'),
         'pretix.event.quota.changed': _('The quota has been changed.'),
+        'pretix.event.quota.closed': _('The quota has closed.'),
+        'pretix.event.quota.opened': _('The quota has been re-opened.'),
         'pretix.event.category.added': _('The category has been added.'),
         'pretix.event.category.deleted': _('The category has been deleted.'),
         'pretix.event.category.changed': _('The category has been changed.'),
@@ -388,6 +401,9 @@ def pretixcontrol_logentry_display(sender: Event, logentry: LogEntry, **kwargs):
 
     if logentry.action_type == 'pretix.team.invite.created':
         return _('{user} has been invited to the team.').format(user=data.get('email'))
+
+    if logentry.action_type == 'pretix.team.invite.resent':
+        return _('Invite for {user} has been resent.').format(user=data.get('email'))
 
     if logentry.action_type == 'pretix.team.invite.deleted':
         return _('The invite for {user} has been revoked.').format(user=data.get('email'))

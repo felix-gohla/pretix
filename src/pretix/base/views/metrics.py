@@ -3,6 +3,7 @@ import hmac
 
 from django.conf import settings
 from django.http import HttpResponse
+from django_scopes import scopes_disabled
 
 from .. import metrics
 
@@ -15,15 +16,16 @@ def unauthed_response():
     return response
 
 
+@scopes_disabled()
 def serve_metrics(request):
     if not settings.METRICS_ENABLED:
         return unauthed_response()
 
     # check if the user is properly authorized:
-    if "HTTP_AUTHORIZATION" not in request.META:
+    if "Authorization" not in request.headers:
         return unauthed_response()
 
-    method, credentials = request.META["HTTP_AUTHORIZATION"].split(" ", 1)
+    method, credentials = request.headers["Authorization"].split(" ", 1)
     if method.lower() != "basic":
         return unauthed_response()
 

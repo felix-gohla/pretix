@@ -9,6 +9,7 @@ from django.db.models import Prefetch, Sum
 from django.utils.decorators import available_attrs
 from django.utils.functional import cached_property
 from django.utils.timezone import now
+from django_scopes import scopes_disabled
 
 from pretix.base.i18n import language
 from pretix.base.models import (
@@ -40,13 +41,16 @@ class CartMixin:
                 self.request._checkout_flow_invoice_address = InvoiceAddress()
             else:
                 try:
-                    self.request._checkout_flow_invoice_address = InvoiceAddress.objects.get(pk=iapk, order__isnull=True)
+                    with scopes_disabled():
+                        self.request._checkout_flow_invoice_address = InvoiceAddress.objects.get(
+                            pk=iapk, order__isnull=True
+                        )
                 except InvoiceAddress.DoesNotExist:
                     self.request._checkout_flow_invoice_address = InvoiceAddress()
         return self.request._checkout_flow_invoice_address
 
     def get_cart(self, answers=False, queryset=None, order=None, downloads=False):
-        if queryset:
+        if queryset is not None:
             prefetch = []
             if answers:
                 prefetch.append('item__questions')
@@ -55,7 +59,7 @@ class CartMixin:
             cartpos = queryset.order_by(
                 'item__category__position', 'item__category_id', 'item__position', 'item__name', 'variation__value'
             ).select_related(
-                'item', 'variation', 'addon_to', 'subevent', 'subevent__event', 'subevent__event__organizer'
+                'item', 'variation', 'addon_to', 'subevent', 'subevent__event', 'subevent__event__organizer', 'seat'
             ).prefetch_related(
                 *prefetch
             )
@@ -99,13 +103,13 @@ class CartMixin:
             )
             addon_penalty = 1 if pos.addon_to else 0
             if downloads or pos.pk in has_addons or pos.addon_to:
-                return i, addon_penalty, pos.pk, 0, 0, 0, 0, (pos.subevent_id or 0)
+                return i, addon_penalty, pos.pk, 0, 0, 0, 0, (pos.subevent_id or 0), pos.seat_id
             if answers and (has_attendee_data or pos.item.questions.all()):
-                return i, addon_penalty, pos.pk, 0, 0, 0, 0, (pos.subevent_id or 0)
+                return i, addon_penalty, pos.pk, 0, 0, 0, 0, (pos.subevent_id or 0), pos.seat_id
 
             return (
                 0, addon_penalty, 0, pos.item_id, pos.variation_id, pos.price, (pos.voucher_id or 0),
-                (pos.subevent_id or 0)
+                (pos.subevent_id or 0), pos.seat_id
             )
 
         positions = []
@@ -203,6 +207,35 @@ def get_cart_total(request):
                 cart_id=get_or_create_cart_id(request), event=request.event
             ).aggregate(sum=Sum('price'))['sum'] or Decimal('0.00')
     return request._cart_total_cache
+
+
+def get_cart_invoice_address(request):
+    from pretix.presale.views.cart import cart_session
+
+    if not hasattr(request, '_checkout_flow_invoice_address'):
+        cs = cart_session(request)
+        iapk = cs.get('invoice_address')
+        if not iapk:
+            request._checkout_flow_invoice_address = InvoiceAddress()
+        else:
+            try:
+                with scopes_disabled():
+                    request._checkout_flow_invoice_address = InvoiceAddress.objects.get(pk=iapk, order__isnull=True)
+            except InvoiceAddress.DoesNotExist:
+                request._checkout_flow_invoice_address = InvoiceAddress()
+    return request._checkout_flow_invoice_address
+
+
+def get_cart_is_free(request):
+    from pretix.presale.views.cart import cart_session
+
+    if not hasattr(request, '_cart_free_cache'):
+        cs = cart_session(request)
+        ia = get_cart_invoice_address(request)
+        total = get_cart_total(request)
+        fees = get_fees(request.event, request, total, ia, cs.get('payment'))
+        request._cart_free_cache = total + sum(f.value for f in fees) == Decimal('0.00')
+    return request._cart_free_cache
 
 
 class EventViewMixin:

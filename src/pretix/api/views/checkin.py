@@ -6,14 +6,15 @@ from django.shortcuts import get_object_or_404
 from django.utils.functional import cached_property
 from django.utils.timezone import now
 from django_filters.rest_framework import DjangoFilterBackend, FilterSet
+from django_scopes import scopes_disabled
 from rest_framework import viewsets
-from rest_framework.decorators import detail_route
+from rest_framework.decorators import action
 from rest_framework.fields import DateTimeField
 from rest_framework.response import Response
 
 from pretix.api.serializers.checkin import CheckinListSerializer
 from pretix.api.serializers.item import QuestionSerializer
-from pretix.api.serializers.order import OrderPositionSerializer
+from pretix.api.serializers.order import CheckinListOrderPositionSerializer
 from pretix.api.views import RichOrderingFilter
 from pretix.api.views.order import OrderPositionFilter
 from pretix.base.models import (
@@ -24,11 +25,11 @@ from pretix.base.services.checkin import (
 )
 from pretix.helpers.database import FixedOrderBy
 
-
-class CheckinListFilter(FilterSet):
-    class Meta:
-        model = CheckinList
-        fields = ['subevent']
+with scopes_disabled():
+    class CheckinListFilter(FilterSet):
+        class Meta:
+            model = CheckinList
+            fields = ['subevent']
 
 
 class CheckinListViewSet(viewsets.ModelViewSet):
@@ -43,7 +44,6 @@ class CheckinListViewSet(viewsets.ModelViewSet):
         qs = self.request.event.checkin_lists.prefetch_related(
             'limit_products',
         )
-        qs = CheckinList.annotate_with_numbers(qs, self.request.event)
         return qs
 
     def perform_create(self, serializer):
@@ -77,7 +77,7 @@ class CheckinListViewSet(viewsets.ModelViewSet):
         )
         super().perform_destroy(instance)
 
-    @detail_route(methods=['GET'])
+    @action(detail=True, methods=['GET'])
     def status(self, *args, **kwargs):
         clist = self.get_object()
         cqs = Checkin.objects.filter(
@@ -92,6 +92,7 @@ class CheckinListViewSet(viewsets.ModelViewSet):
         )
         if not clist.all_products:
             pqs = pqs.filter(item__in=clist.limit_products.values_list('id', flat=True))
+            cqs = cqs.filter(position__item__in=clist.limit_products.values_list('id', flat=True))
 
         ev = clist.subevent or clist.event
         response = {
@@ -146,15 +147,16 @@ class CheckinListViewSet(viewsets.ModelViewSet):
         return Response(response)
 
 
-class CheckinOrderPositionFilter(OrderPositionFilter):
+with scopes_disabled():
+    class CheckinOrderPositionFilter(OrderPositionFilter):
 
-    def has_checkin_qs(self, queryset, name, value):
-        return queryset.filter(last_checked_in__isnull=not value)
+        def has_checkin_qs(self, queryset, name, value):
+            return queryset.filter(last_checked_in__isnull=not value)
 
 
 class CheckinListPositionViewSet(viewsets.ReadOnlyModelViewSet):
-    serializer_class = OrderPositionSerializer
-    queryset = OrderPosition.objects.none()
+    serializer_class = CheckinListOrderPositionSerializer
+    queryset = OrderPosition.all.none()
     filter_backends = (DjangoFilterBackend, RichOrderingFilter)
     ordering = ('attendee_name_cached', 'positionid')
     ordering_fields = (
@@ -189,7 +191,7 @@ class CheckinListPositionViewSet(viewsets.ReadOnlyModelViewSet):
         except ValueError:
             raise Http404()
 
-    def get_queryset(self):
+    def get_queryset(self, ignore_status=False):
         cqs = Checkin.objects.filter(
             position_id=OuterRef('pk'),
             list_id=self.checkinlist.pk
@@ -199,11 +201,15 @@ class CheckinListPositionViewSet(viewsets.ReadOnlyModelViewSet):
 
         qs = OrderPosition.objects.filter(
             order__event=self.request.event,
-            order__status__in=[Order.STATUS_PAID, Order.STATUS_PENDING] if self.checkinlist.include_pending else [Order.STATUS_PAID],
             subevent=self.checkinlist.subevent
         ).annotate(
             last_checked_in=Subquery(cqs)
         )
+
+        if self.request.query_params.get('ignore_status', 'false') != 'true' and not ignore_status:
+            qs = qs.filter(
+                order__status__in=[Order.STATUS_PAID, Order.STATUS_PENDING] if self.checkinlist.include_pending else [Order.STATUS_PAID]
+            )
         if self.request.query_params.get('pdf_data', 'false') == 'true':
             qs = qs.prefetch_related(
                 Prefetch(
@@ -225,7 +231,7 @@ class CheckinListPositionViewSet(viewsets.ReadOnlyModelViewSet):
                     )
                 ))
             ).select_related(
-                'item', 'variation', 'item__category', 'addon_to'
+                'item', 'variation', 'item__category', 'addon_to', 'order', 'order__invoice_address', 'seat'
             )
         else:
             qs = qs.prefetch_related(
@@ -235,19 +241,19 @@ class CheckinListPositionViewSet(viewsets.ReadOnlyModelViewSet):
                 ),
                 'answers', 'answers__options', 'answers__question',
                 Prefetch('addons', OrderPosition.objects.select_related('item', 'variation'))
-            ).select_related('item', 'variation', 'order', 'addon_to', 'order__invoice_address')
+            ).select_related('item', 'variation', 'order', 'addon_to', 'order__invoice_address', 'order', 'seat')
 
         if not self.checkinlist.all_products:
             qs = qs.filter(item__in=self.checkinlist.limit_products.values_list('id', flat=True))
 
         return qs
 
-    @detail_route(methods=['POST'])
+    @action(detail=True, methods=['POST'])
     def redeem(self, *args, **kwargs):
         force = bool(self.request.data.get('force', False))
         ignore_unpaid = bool(self.request.data.get('ignore_unpaid', False))
         nonce = self.request.data.get('nonce')
-        op = self.get_object()
+        op = self.get_object(ignore_status=True)
 
         if 'datetime' in self.request.data:
             dt = DateTimeField().to_internal_value(self.request.data.get('datetime'))
@@ -274,6 +280,7 @@ class CheckinListPositionViewSet(viewsets.ReadOnlyModelViewSet):
                 nonce=nonce,
                 datetime=dt,
                 questions_supported=self.request.data.get('questions_supported', True),
+                canceled_supported=self.request.data.get('canceled_supported', False),
                 user=self.request.user,
                 auth=self.request.auth,
             )
@@ -281,7 +288,7 @@ class CheckinListPositionViewSet(viewsets.ReadOnlyModelViewSet):
             return Response({
                 'status': 'incomplete',
                 'require_attention': op.item.checkin_attention or op.order.checkin_attention,
-                'position': OrderPositionSerializer(op, context=self.get_serializer_context()).data,
+                'position': CheckinListOrderPositionSerializer(op, context=self.get_serializer_context()).data,
                 'questions': [
                     QuestionSerializer(q).data for q in e.questions
                 ]
@@ -291,17 +298,17 @@ class CheckinListPositionViewSet(viewsets.ReadOnlyModelViewSet):
                 'status': 'error',
                 'reason': e.code,
                 'require_attention': op.item.checkin_attention or op.order.checkin_attention,
-                'position': OrderPositionSerializer(op, context=self.get_serializer_context()).data
+                'position': CheckinListOrderPositionSerializer(op, context=self.get_serializer_context()).data
             }, status=400)
         else:
             return Response({
                 'status': 'ok',
                 'require_attention': op.item.checkin_attention or op.order.checkin_attention,
-                'position': OrderPositionSerializer(op, context=self.get_serializer_context()).data
+                'position': CheckinListOrderPositionSerializer(op, context=self.get_serializer_context()).data
             }, status=201)
 
-    def get_object(self):
-        queryset = self.filter_queryset(self.get_queryset())
+    def get_object(self, ignore_status=False):
+        queryset = self.filter_queryset(self.get_queryset(ignore_status=ignore_status))
         if self.kwargs['pk'].isnumeric():
             obj = get_object_or_404(queryset, Q(pk=self.kwargs['pk']) | Q(secret=self.kwargs['pk']))
         else:

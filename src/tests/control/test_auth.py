@@ -11,7 +11,6 @@ from django.test import TestCase, override_settings
 from django.utils.timezone import now
 from django_otp.oath import TOTP
 from django_otp.plugins.otp_totp.models import TOTPDevice
-from u2flib_server.jsapi import JSONDict
 
 from pretix.base.models import U2FDevice, User
 
@@ -103,6 +102,51 @@ class LoginFormTest(TestCase):
 
         response = self.client.get('/control/login')
         self.assertEqual(response.status_code, 200)
+
+    def test_wrong_backend(self):
+        self.user = User.objects.create_user('hallo@example.com', 'dummy', auth_backend='test_request')
+        response = self.client.post('/control/login', {
+            'email': 'hallo@example.com',
+            'password': 'dummy',
+        })
+        self.assertEqual(response.status_code, 200)
+
+    def test_backends_shown(self):
+        response = self.client.get('/control/login')
+        self.assertEqual(response.status_code, 200)
+        assert b'Form' in response.content
+        assert b'pretix User' in response.content
+        assert b'Request' not in response.content
+
+    def test_form_backend(self):
+        response = self.client.get('/control/login?backend=test_form')
+        self.assertEqual(response.status_code, 200)
+        assert b'name="username"' in response.content
+
+        response = self.client.post('/control/login?backend=test_form', {
+            'username': 'dummy',
+            'password': 'dummy',
+        })
+        self.assertEqual(response.status_code, 200)
+        assert b'alert-danger' in response.content
+
+        response = self.client.post('/control/login?backend=test_form', {
+            'username': 'foo',
+            'password': 'bar',
+        })
+        self.assertEqual(response.status_code, 302)
+        response = self.client.get('/control/')
+        assert b'foo' in response.content
+
+    def test_request_backend(self):
+        response = self.client.get('/control/login?backend=test_request')
+        self.assertEqual(response.status_code, 200)
+        assert b'name="email"' in response.content
+
+        response = self.client.get('/control/login', HTTP_X_LOGIN_EMAIL='hallo@example.org')
+        self.assertEqual(response.status_code, 302)
+        response = self.client.get('/control/')
+        assert b'hallo@example.org' in response.content
 
 
 class RegistrationFormTest(TestCase):
@@ -202,6 +246,24 @@ class RegistrationFormTest(TestCase):
         assert time.time() - self.client.session['pretix_auth_login_time'] < 60
         assert not self.client.session['pretix_auth_long_session']
 
+    @override_settings(PRETIX_REGISTRATION=False)
+    def test_disabled(self):
+        response = self.client.post('/control/register', {
+            'email': 'dummy@dummy.dummy',
+            'password': 'foobarbar',
+            'password_repeat': 'foobarbar'
+        })
+        self.assertEqual(response.status_code, 403)
+
+    @override_settings(PRETIX_AUTH_BACKENDS=['tests.testdummy.auth.TestFormAuthBackend'])
+    def test_no_native_auth(self):
+        response = self.client.post('/control/register', {
+            'email': 'dummy@dummy.dummy',
+            'password': 'foobarbar',
+            'password_repeat': 'foobarbar'
+        })
+        self.assertEqual(response.status_code, 403)
+
 
 @pytest.fixture
 def class_monkeypatch(request, monkeypatch):
@@ -239,7 +301,7 @@ class Login2FAFormTest(TestCase):
 
     def test_totp_invalid(self):
         response = self.client.get('/control/login/2fa')
-        assert 'token' in response.rendered_content
+        assert 'token' in response.content.decode()
         d = TOTPDevice.objects.create(user=self.user, name='test')
         totp = TOTP(d.bin_key, d.step, d.t0, d.digits, d.drift)
         totp.time = time.time()
@@ -251,7 +313,7 @@ class Login2FAFormTest(TestCase):
 
     def test_totp_valid(self):
         response = self.client.get('/control/login/2fa')
-        assert 'token' in response.rendered_content
+        assert 'token' in response.content.decode()
         d = TOTPDevice.objects.create(user=self.user, name='test')
         totp = TOTP(d.bin_key, d.step, d.t0, d.digits, d.drift)
         totp.time = time.time()
@@ -268,13 +330,17 @@ class Login2FAFormTest(TestCase):
             raise Exception("Failed")
 
         m = self.monkeypatch
-        m.setattr("u2flib_server.u2f.verify_authenticate", fail)
-        m.setattr("u2flib_server.u2f.start_authenticate",
-                  lambda *args, **kwargs: JSONDict({'authenticateRequests': []}))
-        d = U2FDevice.objects.create(user=self.user, name='test', json_data="{}")
+        m.setattr("webauthn.WebAuthnAssertionResponse.verify", fail)
+        d = U2FDevice.objects.create(
+            user=self.user, name='test',
+            json_data='{"appId": "https://local.pretix.eu", "keyHandle": '
+                      '"j9Rkpon1J5U3eDQMM8YqAvwEapt-m87V8qdCaImiAqmvTJ'
+                      '-sBvnACIKKM6J_RVXF4jPtY0LGyjbHi14sxsoC5g", "publ'
+                      'icKey": "BP5KRLUGvcHbqkCc7eJNXZ9caVXLSk4wjsq'
+                      'L-pLEQcNqVp2E4OeDUIxI0ZLOXry9JSrLn1aAGcGowXiIyB7ynj0"}')
 
         response = self.client.get('/control/login/2fa')
-        assert 'token' in response.rendered_content
+        assert 'token' in response.content.decode()
         response = self.client.post('/control/login/2fa'.format(d.pk), {
             'token': '{"response": "true"}'
         })
@@ -285,13 +351,18 @@ class Login2FAFormTest(TestCase):
 
     def test_u2f_valid(self):
         m = self.monkeypatch
-        m.setattr("u2flib_server.u2f.verify_authenticate", lambda *args, **kwargs: True)
-        m.setattr("u2flib_server.u2f.start_authenticate",
-                  lambda *args, **kwargs: JSONDict({'authenticateRequests': []}))
-        d = U2FDevice.objects.create(user=self.user, name='test', json_data="{}")
+        m.setattr("webauthn.WebAuthnAssertionResponse.verify", lambda *args, **kwargs: 1)
+
+        d = U2FDevice.objects.create(
+            user=self.user, name='test',
+            json_data='{"appId": "https://local.pretix.eu", "keyHandle": '
+                      '"j9Rkpon1J5U3eDQMM8YqAvwEapt-m87V8qdCaImiAqmvTJ'
+                      '-sBvnACIKKM6J_RVXF4jPtY0LGyjbHi14sxsoC5g", "publ'
+                      'icKey": "BP5KRLUGvcHbqkCc7eJNXZ9caVXLSk4wjsq'
+                      'L-pLEQcNqVp2E4OeDUIxI0ZLOXry9JSrLn1aAGcGowXiIyB7ynj0"}')
 
         response = self.client.get('/control/login/2fa')
-        assert 'token' in response.rendered_content
+        assert 'token' in response.content.decode()
         response = self.client.post('/control/login/2fa'.format(d.pk), {
             'token': '{"response": "true"}'
         })
@@ -307,6 +378,15 @@ class FakeRedis(object):
 
     def __init__(self):
         self.storage = {}
+
+    def pipeline(self):
+        return self
+
+    def hincrbyfloat(self, rkey, key, amount):
+        return self
+
+    def commit(self):
+        return self
 
     def exists(self, rkey):
         print(rkey in self.storage)
@@ -352,6 +432,7 @@ class PasswordRecoveryFormTest(TestCase):
         fake_redis = FakeRedis()
         m = self.monkeypatch
         m.setattr('django_redis.get_redis_connection', fake_redis.get_redis_connection, raising=False)
+        m.setattr('pretix.base.metrics.redis', fake_redis, raising=False)
 
         djmail.outbox = []
 
@@ -541,6 +622,20 @@ class PasswordRecoveryFormTest(TestCase):
         self.assertEqual(response.status_code, 200)
         self.user = User.objects.get(id=self.user.id)
         self.assertTrue(self.user.check_password('demo'))
+
+    @override_settings(PRETIX_PASSWORD_RESET=False)
+    def test_disabled(self):
+        response = self.client.post('/control/forgot', {
+            'email': 'dummy@dummy.dummy',
+        })
+        self.assertEqual(response.status_code, 403)
+
+    @override_settings(PRETIX_AUTH_BACKENDS=['tests.testdummy.auth.TestFormAuthBackend'])
+    def test_no_native_auth(self):
+        response = self.client.post('/control/forgot', {
+            'email': 'dummy@dummy.dummy',
+        })
+        self.assertEqual(response.status_code, 403)
 
 
 class SessionTimeOutTest(TestCase):
@@ -759,3 +854,33 @@ def test_staff_session_require_staff(user, client):
     session.save()
     response = client.post('/control/sudo/')
     assert response.status_code == 403
+
+
+@override_settings(PRETIX_OBLIGATORY_2FA=True)
+class Obligatory2FATest(TestCase):
+    def setUp(self):
+        super().setUp()
+        self.user = User.objects.create_user('demo@demo.dummy', 'demo')
+        self.client.login(email='demo@demo.dummy', password='demo')
+
+    def test_enabled_2fa_not_setup(self):
+        response = self.client.get('/control/events/')
+        assert response.status_code == 302
+        assert response.url == '/control/settings/2fa/'
+
+    def test_enabled_2fa_setup_not_enabled(self):
+        U2FDevice.objects.create(user=self.user, name='test', json_data="{}", confirmed=True)
+        self.user.require_2fa = False
+        self.user.save()
+
+        response = self.client.get('/control/events/')
+        assert response.status_code == 302
+        assert response.url == '/control/settings/2fa/'
+
+    def test_enabled_2fa_setup_enabled(self):
+        U2FDevice.objects.create(user=self.user, name='test', json_data="{}", confirmed=True)
+        self.user.require_2fa = True
+        self.user.save()
+
+        response = self.client.get('/control/events/')
+        assert response.status_code == 200

@@ -49,6 +49,10 @@ DEFAULTS = {
         'default': 'True',
         'type': bool,
     },
+    'invoice_address_not_asked_free': {
+        'default': 'False',
+        'type': bool,
+    },
     'invoice_name_required': {
         'default': 'False',
         'type': bool,
@@ -73,6 +77,10 @@ DEFAULTS = {
         'default': 'False',
         'type': bool,
     },
+    'invoice_address_explanation_text': {
+        'default': '',
+        'type': LazyI18nString
+    },
     'invoice_include_free': {
         'default': 'True',
         'type': bool,
@@ -85,6 +93,10 @@ DEFAULTS = {
         'default': '',
         'type': str,
     },
+    'invoice_numbers_prefix_cancellations': {
+        'default': '',
+        'type': str,
+    },
     'invoice_renderer': {
         'default': 'classic',
         'type': str,
@@ -92,6 +104,14 @@ DEFAULTS = {
     'reservation_time': {
         'default': '30',
         'type': int
+    },
+    'redirect_to_checkout_directly': {
+        'default': 'False',
+        'type': bool
+    },
+    'presale_has_ended_text': {
+        'default': '',
+        'type': LazyI18nString
     },
     'payment_explanation': {
         'default': '',
@@ -113,6 +133,10 @@ DEFAULTS = {
         'default': 'True',
         'type': bool
     },
+    'payment_giftcard__enabled': {
+        'default': 'True',
+        'type': bool
+    },
     'payment_term_accept_late': {
         'default': 'True',
         'type': bool
@@ -128,6 +152,10 @@ DEFAULTS = {
     'invoice_generate': {
         'default': 'False',
         'type': str
+    },
+    'invoice_generate_sales_channels': {
+        'default': json.dumps(['web']),
+        'type': list
     },
     'invoice_address_from': {
         'default': '',
@@ -269,6 +297,10 @@ DEFAULTS = {
         'default': 'classic',
         'type': str
     },
+    'mail_attach_ical': {
+        'default': 'False',
+        'type': bool
+    },
     'mail_prefix': {
         'default': None,
         'type': str
@@ -279,6 +311,10 @@ DEFAULTS = {
     },
     'mail_from': {
         'default': settings.MAIL_FROM,
+        'type': str
+    },
+    'mail_from_name': {
+        'default': None,
         'type': str
     },
     'mail_text_signature': {
@@ -310,6 +346,18 @@ The list is as follows:
 Best regards,
 Your {event} team"""))
     },
+    'mail_text_order_free_attendee': {
+        'type': LazyI18nString,
+        'default': LazyI18nString.from_gettext(ugettext_noop("""Hello {attendee_name},
+
+you have been registered for {event} successfully.
+
+You can view the details and status of your ticket here:
+{url}
+
+Best regards,
+Your {event} team"""))
+    },
     'mail_text_order_free': {
         'type': LazyI18nString,
         'default': LazyI18nString.from_gettext(ugettext_noop("""Hello,
@@ -322,6 +370,10 @@ You can change your order details and view the status of your order at
 
 Best regards,
 Your {event} team"""))
+    },
+    'mail_send_order_free_attendee': {
+        'type': bool,
+        'default': 'False'
     },
     'mail_text_order_placed_require_approval': {
         'type': LazyI18nString,
@@ -342,11 +394,27 @@ Your {event} team"""))
         'default': LazyI18nString.from_gettext(ugettext_noop("""Hello,
 
 we successfully received your order for {event} with a total value
-of {total_with_currency}. Please complete your payment before {date}.
+of {total_with_currency}. Please complete your payment before {expire_date}.
 
 {payment_info}
 
 You can change your order details and view the status of your order at
+{url}
+
+Best regards,
+Your {event} team"""))
+    },
+    'mail_send_order_placed_attendee': {
+        'type': bool,
+        'default': 'False'
+    },
+    'mail_text_order_placed_attendee': {
+        'type': LazyI18nString,
+        'default': LazyI18nString.from_gettext(ugettext_noop("""Hello {attendee_name},
+
+a ticket for {event} has been ordered for you.
+
+You can view the details and status of your ticket here:
 {url}
 
 Best regards,
@@ -373,6 +441,22 @@ we successfully received your payment for {event}. Thank you!
 {payment_info}
 
 You can change your order details and view the status of your order at
+{url}
+
+Best regards,
+Your {event} team"""))
+    },
+    'mail_send_order_paid_attendee': {
+        'type': bool,
+        'default': 'False'
+    },
+    'mail_text_order_paid_attendee': {
+        'type': LazyI18nString,
+        'default': LazyI18nString.from_gettext(ugettext_noop("""Hello {attendee_name},
+
+a ticket for {event} that has been ordered for you is now paid.
+
+You can view the details and status of your ticket here:
 {url}
 
 Best regards,
@@ -438,7 +522,7 @@ Your {event} team"""))
 we approved your order for {event} and will be happy to welcome you
 at our event.
 
-Please continue by paying for your order before {date}.
+Please continue by paying for your order before {expire_date}.
 
 You can select a payment method and perform the payment here:
 
@@ -475,6 +559,22 @@ Your {event} team"""))
     'mail_days_download_reminder': {
         'type': int,
         'default': None
+    },
+    'mail_send_download_reminder_attendee': {
+        'type': bool,
+        'default': 'False'
+    },
+    'mail_text_download_reminder_attendee': {
+        'type': LazyI18nString,
+        'default': LazyI18nString.from_gettext(ugettext_noop("""Hello {attendee_name},
+
+you are registered for {event}.
+
+If you did not do so already, you can download your ticket here:
+{url}
+
+Best regards,
+Your {event} team"""))
     },
     'mail_text_download_reminder': {
         'type': LazyI18nString,
@@ -604,6 +704,18 @@ Your {event} team"""))
         'default': '',
         'type': LazyI18nString
     },
+    'opencagedata_apikey': {
+        'default': None,
+        'type': str
+    },
+    'leaflet_tiles': {
+        'default': None,
+        'type': str
+    },
+    'leaflet_tiles_attribution': {
+        'default': None,
+        'type': str
+    },
     'frontpage_subevent_ordering': {
         'default': 'date_ascending',
         'type': str
@@ -613,6 +725,23 @@ Your {event} team"""))
         'type': str
     }
 }
+PERSON_NAME_TITLE_GROUPS = OrderedDict([
+    ('english_common', (_('Most common English titles'), (
+        'Mr',
+        'Ms',
+        'Mrs',
+        'Miss',
+        'Mx',
+        'Dr',
+        'Professor',
+        'Sir'
+    ))),
+    ('german_common', (_('Most common German titles'), (
+        'Dr.',
+        'Prof.',
+        'Prof. Dr.',
+    )))
+])
 PERSON_NAME_SCHEMES = OrderedDict([
     ('given_family', {
         'fields': (
@@ -624,6 +753,22 @@ PERSON_NAME_SCHEMES = OrderedDict([
             'given_name': pgettext_lazy('person_name_sample', 'John'),
             'family_name': pgettext_lazy('person_name_sample', 'Doe'),
             '_scheme': 'given_family',
+        },
+    }),
+    ('title_given_family', {
+        'fields': (
+            ('title', pgettext_lazy('person_name', 'Title'), 1),
+            ('given_name', _('Given name'), 2),
+            ('family_name', _('Family name'), 2),
+        ),
+        'concatenation': lambda d: ' '.join(
+            str(p) for p in [d.get('title', ''), d.get('given_name', ''), d.get('family_name', '')] if p
+        ),
+        'sample': {
+            'title': pgettext_lazy('person_name_sample', 'Dr'),
+            'given_name': pgettext_lazy('person_name_sample', 'John'),
+            'family_name': pgettext_lazy('person_name_sample', 'Doe'),
+            '_scheme': 'title_given_family',
         },
     }),
     ('title_given_family', {
@@ -755,6 +900,19 @@ PERSON_NAME_SCHEMES = OrderedDict([
         },
     }),
 ])
+COUNTRIES_WITH_STATE_IN_ADDRESS = {
+    # Source: http://www.bitboost.com/ref/international-address-formats.html
+    # This is not a list of countries that *have* states, this is a list of countries where states
+    # are actually *used* in postal addresses. This is obviously not complete and opinionated.
+    # Country: [(List of subdivision types as defined by pycountry), (short or long form to be used)]
+    'AU': (['State', 'Territory'], 'short'),
+    'BR': (['State'], 'short'),
+    'CA': (['Province', 'Territory'], 'short'),
+    'CN': (['Province', 'Autonomous region', 'Munincipality'], 'long'),
+    'MY': (['State'], 'long'),
+    'MX': (['State', 'Federal District'], 'short'),
+    'US': (['State', 'Outlying area', 'District'], 'short'),
+}
 
 
 settings_hierarkey = Hierarkey(attribute_name='settings')

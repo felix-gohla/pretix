@@ -12,6 +12,7 @@ from django.template.loader import get_template
 from django.urls import reverse
 from django.utils.http import urlquote
 from django.utils.translation import ugettext as __, ugettext_lazy as _
+from paypalrestsdk.exceptions import BadRequest
 from paypalrestsdk.openid_connect import Tokeninfo
 
 from pretix.base.decimal import round_decimal
@@ -166,7 +167,17 @@ class Paypal(BasePaymentProvider):
             kwargs['cart_namespace'] = request.resolver_match.kwargs['cart_namespace']
 
         if request.event.settings.payment_paypal_connect_user_id:
-            userinfo = Tokeninfo.create_with_refresh_token(request.event.settings.payment_paypal_connect_refresh_token).userinfo()
+            try:
+                userinfo = Tokeninfo.create_with_refresh_token(request.event.settings.payment_paypal_connect_refresh_token).userinfo()
+            except BadRequest as ex:
+                ex = json.loads(ex.content)
+                messages.error(request, '{}: {} ({})'.format(
+                    _('We had trouble communicating with PayPal'),
+                    ex['error_description'],
+                    ex['correlation_id'])
+                )
+                return
+
             request.event.settings.payment_paypal_connect_user_id = userinfo.email
             payee = {
                 "email": request.event.settings.payment_paypal_connect_user_id,
@@ -178,6 +189,7 @@ class Paypal(BasePaymentProvider):
             payee = {}
 
         payment = paypalrestsdk.Payment({
+            'header': {'PayPal-Partner-Attribution-Id': 'ramiioSoftwareentwicklung_SP'},
             'intent': 'sale',
             'payer': {
                 "payment_method": "paypal",
@@ -383,6 +395,20 @@ class Paypal(BasePaymentProvider):
                'retry': retry, 'order': payment.order}
         return template.render(ctx)
 
+    def api_payment_details(self, payment: OrderPayment):
+        sale_id = None
+        for trans in payment.info_data.get('transactions', []):
+            for res in trans.get('related_resources', []):
+                if 'sale' in res and 'id' in res['sale']:
+                    sale_id = res['sale']['id']
+        return {
+            "payer_email": payment.info_data.get('payer', {}).get('payer_info', {}).get('email'),
+            "payer_id": payment.info_data.get('payer', {}).get('payer_info', {}).get('payer_id'),
+            "cart_id": payment.info_data.get('cart', None),
+            "payment_id": payment.info_data.get('id', None),
+            "sale_id": sale_id,
+        }
+
     def payment_control_render(self, request: HttpRequest, payment: OrderPayment):
         template = get_template('pretixplugins/paypal/control.html')
         ctx = {'request': request, 'event': self.event, 'settings': self.settings,
@@ -435,6 +461,7 @@ class Paypal(BasePaymentProvider):
             payee = {}
 
         payment = paypalrestsdk.Payment({
+            'header': {'PayPal-Partner-Attribution-Id': 'ramiioSoftwareentwicklung_SP'},
             'intent': 'sale',
             'payer': {
                 "payment_method": "paypal",

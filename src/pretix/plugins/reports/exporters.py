@@ -3,6 +3,7 @@ from collections import OrderedDict, defaultdict
 from decimal import Decimal
 
 import pytz
+from dateutil.parser import parse
 from django import forms
 from django.conf import settings
 from django.contrib.staticfiles import finders
@@ -11,15 +12,16 @@ from django.db.models import Max, OuterRef, Subquery, Sum
 from django.template.defaultfilters import floatformat
 from django.utils.formats import date_format, localize
 from django.utils.timezone import get_current_timezone, now
-from django.utils.translation import pgettext, pgettext_lazy, ugettext as _
+from django.utils.translation import pgettext, ugettext as _, ugettext_lazy
 from reportlab.lib import colors
 
 from pretix.base.decimal import round_decimal
-from pretix.base.exporter import BaseExporter
+from pretix.base.exporter import BaseExporter, ListExporter
 from pretix.base.models import Order, OrderPosition
 from pretix.base.models.event import SubEvent
 from pretix.base.models.orders import OrderFee, OrderPayment
 from pretix.base.services.stats import order_overview
+from pretix.control.forms.filter import OverviewFilterForm
 
 
 class ReportlabExportMixin:
@@ -148,7 +150,7 @@ class Report(ReportlabExportMixin, BaseExporter):
 class OverviewReport(Report):
     name = "overview"
     identifier = 'pdfreport'
-    verbose_name = _('Order overview (PDF)')
+    verbose_name = ugettext_lazy('Order overview (PDF)')
 
     @property
     def pagesize(self):
@@ -159,6 +161,11 @@ class OverviewReport(Report):
     def get_story(self, doc, form_data):
         from reportlab.platypus import Paragraph, Spacer, TableStyle, Table
         from reportlab.lib.units import mm
+
+        if form_data.get('date_from'):
+            form_data['date_from'] = parse(form_data['date_from'])
+        if form_data.get('date_until'):
+            form_data['date_until'] = parse(form_data['date_until'])
 
         headlinestyle = self.get_style()
         headlinestyle.fontSize = 15
@@ -190,7 +197,17 @@ class OverviewReport(Report):
             Paragraph(_('Orders by product'), headlinestyle),
             Spacer(1, 5 * mm)
         ]
-        if self.form_data.get('subevent'):
+        if form_data.get('date_axis'):
+            story += [
+                Paragraph(_('{axis} between {start} and {end}').format(
+                    axis=dict(OverviewFilterForm(event=self.event).fields['date_axis'].choices)[form_data.get('date_axis')],
+                    start=date_format(form_data.get('date_from'), 'SHORT_DATE_FORMAT') if form_data.get('date_from') else '–',
+                    end=date_format(form_data.get('date_until'), 'SHORT_DATE_FORMAT') if form_data.get('date_until') else '–',
+                ), self.get_style()),
+                Spacer(1, 5 * mm)
+            ]
+
+        if form_data.get('subevent'):
             try:
                 subevent = self.event.subevents.get(pk=self.form_data.get('subevent'))
             except SubEvent.DoesNotExist:
@@ -215,7 +232,13 @@ class OverviewReport(Report):
             ],
         ]
 
-        items_by_category, total = order_overview(self.event, subevent=self.form_data.get('subevent'))
+        items_by_category, total = order_overview(
+            self.event,
+            subevent=form_data.get('subevent'),
+            date_filter=form_data.get('date_axis'),
+            date_from=form_data.get('date_from'),
+            date_until=form_data.get('date_until'),
+        )
         places = settings.CURRENCY_PLACES.get(self.event.currency, 2)
         states = (
             ('canceled', Order.STATUS_CANCELED),
@@ -264,21 +287,15 @@ class OverviewReport(Report):
 
     @property
     def export_form_fields(self) -> dict:
-        d = OrderedDict()
-        if self.event.has_subevents:
-            d['subevent'] = forms.ModelChoiceField(
-                self.event.subevents.all(),
-                label=pgettext_lazy('subevent', 'Date'),
-                required=False,
-                empty_label=pgettext_lazy('subevent', 'All dates')
-            )
-        return d
+        f = OverviewFilterForm(event=self.event)
+        del f.fields['ordering']
+        return f.fields
 
 
-class OrderTaxListReport(Report):
+class OrderTaxListReportPDF(Report):
     name = "ordertaxlist"
     identifier = 'ordertaxes'
-    verbose_name = _('List of orders with taxes (PDF)')
+    verbose_name = ugettext_lazy('List of orders with taxes (PDF)')
 
     @property
     def export_form_fields(self):
@@ -286,7 +303,7 @@ class OrderTaxListReport(Report):
             [
                 ('status',
                  forms.MultipleChoiceField(
-                     label=_('Filter by status'),
+                     label=ugettext_lazy('Filter by status'),
                      initial=[Order.STATUS_PAID],
                      choices=Order.STATUS_CHOICE,
                      widget=forms.CheckboxSelectMultiple,
@@ -294,11 +311,11 @@ class OrderTaxListReport(Report):
                  )),
                 ('sort',
                  forms.ChoiceField(
-                     label=_('Sort by'),
+                     label=ugettext_lazy('Sort by'),
                      initial='datetime',
                      choices=(
-                         ('datetime', _('Order date')),
-                         ('payment_date', _('Payment date')),
+                         ('datetime', ugettext_lazy('Order date')),
+                         ('payment_date', ugettext_lazy('Payment date')),
                      ),
                      widget=forms.RadioSelect,
                      required=False
@@ -361,7 +378,7 @@ class OrderTaxListReport(Report):
         tdata = [
             [
                 _('Order code'), _('Order date'), _('Status'), _('Payment date'), _('Order total'),
-            ] + sum(([str(t) + ' %', ''] for t in tax_rates), []),
+            ] + sum(([localize(t) + ' %', ''] for t in tax_rates), []),
             [
                 '', '', '', '', ''
             ] + sum(([_('Gross'), _('Tax')] for t in tax_rates), []),
@@ -406,36 +423,164 @@ class OrderTaxListReport(Report):
                         date_format(op['order__datetime'].astimezone(tz), "SHORT_DATE_FORMAT"),
                         status_labels[op['order__status']],
                         date_format(op['payment_date'], "SHORT_DATE_FORMAT") if op['payment_date'] else '',
-                        localize(round_decimal(op['order__total'], self.event.currency))
+                        op['order__total']
                     ] + sum((['', ''] for t in tax_rates), []),
                 )
                 last_order_code = op['order__code']
                 for i, rate in enumerate(tax_rates):
                     odata = fee_sum_cache.get((op['order__id'], rate))
                     if odata:
-                        tdata[-1][5 + 2 * i] = str(odata['grosssum'] or 0)
-                        tdata[-1][6 + 2 * i] = str(odata['taxsum'] or 0)
-                        tax_sums[rate] += odata['taxsum'] or 0
-                        price_sums[rate] += odata['grosssum'] or 0
+                        tdata[-1][5 + 2 * i] = odata['grosssum'] or Decimal('0.00')
+                        tdata[-1][6 + 2 * i] = odata['taxsum'] or Decimal('0.00')
+                        tax_sums[rate] += odata['taxsum'] or Decimal('0.00')
+                        price_sums[rate] += odata['grosssum'] or Decimal('0.00')
 
-                i = tax_rates.index(op['tax_rate'])
-                tdata[-1][5 + 2 * i] = localize(
-                    round_decimal(Decimal(tdata[-1][5 + 2 * i] or '0') + op['prices'], self.event.currency))
-                tdata[-1][6 + 2 * i] = localize(
-                    round_decimal(Decimal(tdata[-1][6 + 2 * i] or '0') + op['tax_values'], self.event.currency))
-                tax_sums[op['tax_rate']] += op['tax_values']
-                price_sums[op['tax_rate']] += op['prices']
+            i = tax_rates.index(op['tax_rate'])
+            tdata[-1][5 + 2 * i] = (tdata[-1][5 + 2 * i] or Decimal('0.00')) + op['prices']
+            tdata[-1][6 + 2 * i] = (tdata[-1][6 + 2 * i] or Decimal('0.00')) + op['tax_values']
+            tax_sums[op['tax_rate']] += op['tax_values']
+            price_sums[op['tax_rate']] += op['prices']
 
         tdata.append(
             [
                 _('Total'), '', '', '', ''
             ] + sum(([
-                localize(round_decimal(price_sums.get(t), self.event.currency)),
-                localize(round_decimal(tax_sums.get(t), self.event.currency))
+                price_sums.get(t) or Decimal('0.00'),
+                tax_sums.get(t) or Decimal('0.00')
             ] for t in tax_rates), []),
         )
+        tdata = [
+            [
+                localize(round_decimal(c, self.event.currency))
+                if isinstance(c, (Decimal, int, float))
+                else c
+                for c in row
+            ] for row in tdata
+        ]
 
         table = Table(tdata, colWidths=colwidths, repeatRows=2)
         table.setStyle(TableStyle(tstyledata))
         story.append(table)
         return story
+
+
+class OrderTaxListReport(ListExporter):
+    identifier = 'ordertaxeslist'
+    verbose_name = ugettext_lazy('List of orders with taxes')
+
+    @property
+    def export_form_fields(self):
+        f = super().export_form_fields
+        f.update(OrderedDict(
+            [
+                ('status',
+                 forms.MultipleChoiceField(
+                     label=_('Filter by status'),
+                     initial=[Order.STATUS_PAID],
+                     choices=Order.STATUS_CHOICE,
+                     widget=forms.CheckboxSelectMultiple,
+                     required=False
+                 )),
+                ('sort',
+                 forms.ChoiceField(
+                     label=_('Sort by'),
+                     initial='datetime',
+                     choices=(
+                         ('datetime', ugettext_lazy('Order date')),
+                         ('payment_date', ugettext_lazy('Payment date')),
+                     ),
+                     widget=forms.RadioSelect,
+                     required=False
+                 )),
+            ]
+        ))
+        return f
+
+    def iterate_list(self, form_data):
+        tz = pytz.timezone(self.event.settings.timezone)
+
+        tax_rates = set(
+            a for a
+            in OrderFee.objects.filter(
+                order__event=self.event
+            ).values_list('tax_rate', flat=True).distinct().order_by()
+        )
+        tax_rates |= set(
+            a for a
+            in OrderPosition.objects.filter(order__event=self.event).filter(
+                order__status__in=form_data['status']
+            ).values_list('tax_rate', flat=True).distinct().order_by()
+        )
+        tax_rates = sorted(tax_rates)
+
+        yield [
+            _('Order code'), _('Order date'), _('Status'), _('Payment date'), _('Order total'),
+        ] + sum(([str(t) + ' % ' + _('Gross'), str(t) + ' % ' + _('Tax')] for t in tax_rates), [])
+
+        op_date = OrderPayment.objects.filter(
+            order=OuterRef('order'),
+            state__in=(OrderPayment.PAYMENT_STATE_CONFIRMED, OrderPayment.PAYMENT_STATE_REFUNDED),
+            payment_date__isnull=False
+        ).values('order').annotate(
+            m=Max('payment_date')
+        ).values(
+            'm'
+        ).order_by()
+        qs = OrderPosition.objects.filter(
+            order__status__in=form_data['status'],
+            order__event=self.event,
+        ).annotate(payment_date=Subquery(op_date, output_field=models.DateTimeField())).values(
+            'order__code', 'order__datetime', 'payment_date', 'order__total', 'tax_rate', 'order__status',
+            'order__id'
+        ).annotate(prices=Sum('price'), tax_values=Sum('tax_value')).order_by(
+            'order__datetime' if form_data['sort'] == 'datetime' else 'payment_date',
+            'order__datetime',
+            'order__code'
+        )
+        fee_sum_cache = {
+            (o['order__id'], o['tax_rate']): o for o in
+            OrderFee.objects.values('tax_rate', 'order__id').order_by().annotate(
+                taxsum=Sum('tax_value'), grosssum=Sum('value')
+            )
+        }
+
+        last_order_code = None
+        tax_sums = defaultdict(Decimal)
+        price_sums = defaultdict(Decimal)
+        status_labels = dict(Order.STATUS_CHOICE)
+        row = None
+        for op in qs:
+            if op['order__code'] != last_order_code:
+                if row:
+                    yield row
+                    row = None
+                row = [
+                    op['order__code'],
+                    date_format(op['order__datetime'].astimezone(tz), "SHORT_DATE_FORMAT"),
+                    status_labels[op['order__status']],
+                    date_format(op['payment_date'], "SHORT_DATE_FORMAT") if op['payment_date'] else '',
+                    round_decimal(op['order__total'], self.event.currency),
+                ] + sum(([Decimal('0.00'), Decimal('0.00')] for t in tax_rates), [])
+                last_order_code = op['order__code']
+                for i, rate in enumerate(tax_rates):
+                    odata = fee_sum_cache.get((op['order__id'], rate))
+                    if odata:
+                        row[5 + 2 * i] = odata['grosssum'] or 0
+                        row[6 + 2 * i] = odata['taxsum'] or 0
+                        tax_sums[rate] += odata['taxsum'] or 0
+                        price_sums[rate] += odata['grosssum'] or 0
+
+            i = tax_rates.index(op['tax_rate'])
+            row[5 + 2 * i] = round_decimal(row[5 + 2 * i] + op['prices'], self.event.currency)
+            row[6 + 2 * i] = round_decimal(row[6 + 2 * i] + op['tax_values'], self.event.currency)
+            tax_sums[op['tax_rate']] += op['tax_values']
+            price_sums[op['tax_rate']] += op['prices']
+
+        if row:
+            yield row
+        yield [
+            _('Total'), '', '', '', ''
+        ] + sum(([
+            round_decimal(price_sums.get(t) or Decimal('0.00'), self.event.currency),
+            round_decimal(tax_sums.get(t) or Decimal('0.00'), self.event.currency)
+        ] for t in tax_rates), [])

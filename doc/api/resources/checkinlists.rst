@@ -1,3 +1,5 @@
+.. spelling:: checkin
+
 Check-in lists
 ==============
 
@@ -27,6 +29,7 @@ subevent                              integer                    ID of the date 
 position_count                        integer                    Number of tickets that match this list (read-only).
 checkin_count                         integer                    Number of check-ins performed on this list (read-only).
 include_pending                       boolean                    If ``true``, the check-in list also contains tickets from orders in pending state.
+auto_checkin_sales_channels           list of strings            All items on the check-in list will be automatically marked as checked-in when purchased through any of the listed sales channels.
 ===================================== ========================== =======================================================
 
 .. versionchanged:: 1.10
@@ -40,6 +43,10 @@ include_pending                       boolean                    If ``true``, th
 .. versionchanged:: 1.13
 
    The ``include_pending`` field has been added.
+
+.. versionchanged:: 3.2
+
+    The ``auto_checkin_sales_channels`` field has been added.
 
 Endpoints
 ---------
@@ -81,7 +88,10 @@ Endpoints
             "all_products": true,
             "limit_products": [],
             "include_pending": false,
-            "subevent": null
+            "subevent": null,
+            "auto_checkin_sales_channels": [
+              "pretixpos"
+            ]
           }
         ]
       }
@@ -122,7 +132,10 @@ Endpoints
         "all_products": true,
         "limit_products": [],
         "include_pending": false,
-        "subevent": null
+        "subevent": null,
+        "auto_checkin_sales_channels": [
+          "pretixpos"
+        ]
       }
 
    :param organizer: The ``slug`` field of the organizer to fetch
@@ -156,14 +169,14 @@ Endpoints
         "checkin_count": 17,
         "position_count": 42,
         "event": {
-          "name": "Demo Converence",
+          "name": "Demo Conference"
         },
         "items": [
           {
             "name": "T-Shirt",
             "id": 1,
             "checkin_count": 1,
-            "admission": False,
+            "admission": false,
             "position_count": 1,
             "variations": [
               {
@@ -184,7 +197,7 @@ Endpoints
             "name": "Ticket",
             "id": 2,
             "checkin_count": 15,
-            "admission": True,
+            "admission": true,
             "position_count": 22,
             "variations": []
           }
@@ -209,13 +222,16 @@ Endpoints
       POST /api/v1/organizers/bigevents/events/sampleconf/checkinlists/ HTTP/1.1
       Host: pretix.eu
       Accept: application/json, text/javascript
-      Content: application/json
+      Content-Type: application/json
 
       {
         "name": "VIP entry",
         "all_products": false,
         "limit_products": [1, 2],
-        "subevent": null
+        "subevent": null,
+        "auto_checkin_sales_channels": [
+          "pretixpos"
+        ]
       }
 
    **Example response**:
@@ -234,7 +250,10 @@ Endpoints
         "all_products": false,
         "limit_products": [1, 2],
         "include_pending": false,
-        "subevent": null
+        "subevent": null,
+        "auto_checkin_sales_channels": [
+          "pretixpos"
+        ]
       }
 
    :param organizer: The ``slug`` field of the organizer of the event/item to create a list for
@@ -283,7 +302,10 @@ Endpoints
         "all_products": false,
         "limit_products": [1, 2],
         "include_pending": false,
-        "subevent": null
+        "subevent": null,
+        "auto_checkin_sales_channels": [
+          "pretixpos"
+        ]
       }
 
    :param organizer: The ``slug`` field of the organizer to modify
@@ -336,11 +358,29 @@ Order position endpoints
 
    The order positions endpoint has been extended by the filter queries ``voucher`` and ``voucher__code``.
 
+.. versionchanged:: 2.7
+
+   The resource now contains the new attributes ``require_attention`` and ``order__status`` and accepts the new
+   ``ignore_status`` filter. The ``attendee_name`` field is now "smart" (see below) and the redemption endpoint
+   returns ``400`` instead of ``404`` on tickets which are known but not paid.
+
+.. versionchanged:: 3.2
+
+    The ``checkins`` dict now also contains a ``auto_checked_in`` value to indicate if the check-in has been performed
+    automatically by the system.
+
 .. http:get:: /api/v1/organizers/(organizer)/events/(event)/checkinlists/(list)/positions/
 
    Returns a list of all order positions within a given event. The result is the same as
-   the :ref:`order-position-resource`, with one important difference: the ``checkins`` value will only include
-   check-ins for the selected list.
+   the :ref:`order-position-resource`, with the following differences:
+
+   * The ``checkins`` value will only include check-ins for the selected list.
+
+   * An additional boolean property ``require_attention`` will inform you whether either the order or the item
+     have the ``checkin_attention`` flag set.
+
+   * If ``attendee_name`` is empty, it will automatically fall back to values from a parent product or from invoice
+     addresses.
 
    **Example request**:
 
@@ -383,10 +423,12 @@ Order position endpoints
             "addon_to": null,
             "subevent": null,
             "pseudonymization_id": "MQLJvANO3B",
+            "seat": null,
             "checkins": [
               {
                 "list": 1,
-                "datetime": "2017-12-25T12:45:23Z"
+                "datetime": "2017-12-25T12:45:23Z",
+                "auto_checked_in": true
               }
             ],
             "answers": [
@@ -407,6 +449,8 @@ Order position endpoints
       }
 
    :query integer page: The page number in case of a multi-page result set, default is 1
+   :query string ignore_status: If set to ``true``, results will be returned regardless of the state of
+                                 the order they belong to and you will need to do your own filtering by order status.
    :query string ordering: Manually set the ordering of results. Valid fields to be used are ``order__code``,
                            ``order__datetime``, ``positionid``, ``attendee_name``, ``last_checked_in`` and ``order__email``. Default:
                            ``attendee_name,positionid``
@@ -442,8 +486,15 @@ Order position endpoints
 .. http:get:: /api/v1/organizers/(organizer)/events/(event)/checkinlists/(list)/positions/(id)/
 
    Returns information on one order position, identified by its internal ID.
-   The result format is the same as the :ref:`order-position-resource`, with one important difference: the
-   ``checkins`` value will only include check-ins for the selected list.
+   The result is the same as the :ref:`order-position-resource`, with the following differences:
+
+   * The ``checkins`` value will only include check-ins for the selected list.
+
+   * An additional boolean property ``require_attention`` will inform you whether either the order or the item
+     have the ``checkin_attention`` flag set.
+
+   * If ``attendee_name`` is empty, it will automatically fall back to values from a parent product or from invoice
+     addresses.
 
    **Instead of an ID, you can also use the ``secret`` field as the lookup parameter.**
 
@@ -483,10 +534,12 @@ Order position endpoints
         "addon_to": null,
         "subevent": null,
         "pseudonymization_id": "MQLJvANO3B",
+        "seat": null,
         "checkins": [
           {
             "list": 1,
-            "datetime": "2017-12-25T12:45:23Z"
+            "datetime": "2017-12-25T12:45:23Z",
+            "auto_checked_in": true
           }
         ],
         "answers": [
@@ -524,11 +577,14 @@ Order position endpoints
                                        you do not implement question handling in your user interface, you **must**
                                        set this to ``false``. In that case, questions will just be ignored. Defaults
                                        to ``true``.
+   :<json boolean canceled_supported: When this parameter is set to ``true``, the response code ``canceled`` may be
+                                      returned. Otherwise, canceled orders will return ``unpaid``.
    :<json datetime datetime: Specifies the datetime of the check-in. If not supplied, the current time will be used.
    :<json boolean force: Specifies that the check-in should succeed regardless of previous check-ins or required
                          questions that have not been filled. Defaults to ``false``.
    :<json boolean ignore_unpaid: Specifies that the check-in should succeed even if the order is in pending state.
-                                 Defaults to ``false``.
+                                 Defaults to ``false`` and only works when ``include_pending`` is set on the check-in
+                                 list.
    :<json string nonce: You can set this parameter to a unique random value to identify this check-in. If you're sending
                         this request twice with the same nonce, the second request will also succeed but will always
                         create only one check-in object even when the previous request was successful as well. This
@@ -551,6 +607,7 @@ Order position endpoints
         "nonce": "Pvrk50vUzQd0DhdpNRL4I4OcXsvg70uA",
         "datetime": null,
         "questions_supported": true,
+        "canceled_supported": true,
         "answers": {
           "4": "XS"
         }
@@ -634,7 +691,9 @@ Order position endpoints
 
    Possible error reasons:
 
-   * ``unpaid`` - Ticket is not paid for or has been refunded
+   * ``unpaid`` - Ticket is not paid for
+   * ``canceled`` – Ticket is canceled or expired. This reason is only sent when your request sets
+     ``canceled_supported`` to ``true``, otherwise these orders return ``unpaid``.
    * ``already_redeemed`` - Ticket already has been redeemed
    * ``product`` - Tickets with this product may not be scanned at this device
 

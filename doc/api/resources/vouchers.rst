@@ -18,8 +18,8 @@ max_usages                            integer                    The maximum num
 redeemed                              integer                    The number of times this voucher already has been
                                                                  redeemed.
 valid_until                           datetime                   The voucher expiration date (or ``null``).
-block_quota                           boolean                    If ``True``, quota is blocked for this voucher.
-allow_ignore_quota                    boolean                    If ``True``, this voucher can be redeemed even if a
+block_quota                           boolean                    If ``true``, quota is blocked for this voucher.
+allow_ignore_quota                    boolean                    If ``true``, this voucher can be redeemed even if a
                                                                  product is sold out and even if quota is not blocked
                                                                  for this voucher.
 price_mode                            string                     Determines how this voucher affects product prices.
@@ -41,12 +41,17 @@ quota                                 integer                    An ID of a quot
 tag                                   string                     A string that is used for grouping vouchers
 comment                               string                     An internal comment on the voucher
 subevent                              integer                    ID of the date inside an event series this voucher belongs to (or ``null``).
+show_hidden_items                     boolean                    Only if set to ``true``, this voucher allows to buy products with the property ``hide_without_voucher``. Defaults to ``true``.
 ===================================== ========================== =======================================================
 
 
 .. versionchanged:: 1.9
 
    The write operations ``POST``, ``PATCH``, ``PUT``, and ``DELETE`` have been added.
+
+.. versionchanged:: 3.0
+
+   The attribute ``show_hidden_items`` has been added.
 
 Endpoints
 ---------

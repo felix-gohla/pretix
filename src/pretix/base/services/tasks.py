@@ -14,10 +14,12 @@ import time
 
 from django.conf import settings
 from django.db import transaction
+from django_scopes import scope, scopes_disabled
 
 from pretix.base.metrics import (
     pretix_task_duration_seconds, pretix_task_runs_total,
 )
+from pretix.base.models import Event
 from pretix.celery_app import app
 
 
@@ -61,6 +63,35 @@ class ProfiledTask(app.Task):
         return super().on_success(retval, task_id, args, kwargs)
 
 
+class EventTask(app.Task):
+    def __call__(self, *args, **kwargs):
+        if 'event_id' in kwargs:
+            event_id = kwargs.get('event_id')
+            with scopes_disabled():
+                event = Event.objects.select_related('organizer').get(pk=event_id)
+            del kwargs['event_id']
+            kwargs['event'] = event
+        elif 'event' in kwargs:
+            event_id = kwargs.get('event')
+            with scopes_disabled():
+                event = Event.objects.select_related('organizer').get(pk=event_id)
+            kwargs['event'] = event
+        else:
+            args = list(args)
+            event_id = args[0]
+            with scopes_disabled():
+                event = Event.objects.select_related('organizer').get(pk=event_id)
+            args[0] = event
+
+        with scope(organizer=event.organizer):
+            ret = super().__call__(*args, **kwargs)
+        return ret
+
+
+class ProfiledEventTask(ProfiledTask, EventTask):
+    pass
+
+
 class TransactionAwareTask(ProfiledTask):
     """
     Task class which is aware of django db transactions and only executes tasks
@@ -74,4 +105,16 @@ class TransactionAwareTask(ProfiledTask):
         """
         transaction.on_commit(
             lambda: super(TransactionAwareTask, self).apply_async(*args, **kwargs)
+        )
+
+
+class TransactionAwareProfiledEventTask(ProfiledEventTask):
+
+    def apply_async(self, *args, **kwargs):
+        """
+        Unlike the default task in celery, this task does not return an async
+        result
+        """
+        transaction.on_commit(
+            lambda: super(TransactionAwareProfiledEventTask, self).apply_async(*args, **kwargs)
         )

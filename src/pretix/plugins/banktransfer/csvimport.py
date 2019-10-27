@@ -28,11 +28,10 @@ def parse(data, hint):
             resrow['amount'] = re.sub('[^0-9,+.-]', '', resrow['amount'])
         if hint.get('date') is not None:
             resrow['date'] = row[int(hint.get('date'))].strip()
-        if len(resrow['amount']) == 0 or 'amount' not in resrow \
-                or len(resrow['reference']) == 0 or resrow['date'] == '':
+        if len(resrow['amount']) == 0 or 'amount' not in resrow or resrow['date'] == '':
             # This is probably a headline or something other special.
             continue
-        if resrow['reference'] or resrow['payer']:
+        if resrow.get('reference') or resrow.get('payer'):
             good_hint = True
         result.append(resrow)
     return result, good_hint

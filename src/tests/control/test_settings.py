@@ -2,12 +2,14 @@ import datetime
 import json
 import re
 
+from django_scopes import scopes_disabled
 from tests.base import SoupTest
 
 from pretix.base.models import Event, Organizer, Team, User
 
 
 class MailSettingPreviewTest(SoupTest):
+    @scopes_disabled()
     def setUp(self):
         self.user = User.objects.create_user('dummy@dummy.dummy', 'dummy')
         self.orga1 = Organizer.objects.create(name='CCC', slug='ccc')
@@ -32,10 +34,11 @@ class MailSettingPreviewTest(SoupTest):
         self.target = '/control/event/{}/{}/settings/email/preview'
 
     def test_permission(self):
-        self.event2 = Event.objects.create(
-            organizer=self.orga2, name='30M3', slug='30m3',
-            date_from=datetime.datetime(2013, 12, 26, tzinfo=datetime.timezone.utc),
-        )
+        with scopes_disabled():
+            self.event2 = Event.objects.create(
+                organizer=self.orga2, name='30M3', slug='30m3',
+                date_from=datetime.datetime(2013, 12, 26, tzinfo=datetime.timezone.utc),
+            )
         response = self.client.post(self.target.format(
             self.orga2.slug, self.event2.slug), {
             'test': 'test1'
@@ -141,7 +144,7 @@ class MailSettingPreviewTest(SoupTest):
         assert self.locale_event.name['en'] in res['msgs']['en']
 
     def test_mail_text_order_placed(self):
-        text = '{event}{total}{currency}{date}{payment_info}{url}{invoice_name}{invoice_company}'
+        text = '{event}{total}{currency}{expire_date}{payment_info}{url}{invoice_name}{invoice_company}'
         response = self.client.post(self.target.format(
             self.orga1.slug, self.event1.slug), {
             'item': 'mail_text_order_placed',
@@ -270,8 +273,8 @@ class MailSettingPreviewTest(SoupTest):
         assert len(res['msgs']) == 1
         assert text in res['msgs']['en']
 
-    def test_localised_date(self):
-        dummy_text = '{date}'
+    def test_localized_date(self):
+        dummy_text = '{expire_date}'
         response = self.client.post(self.target.format(
             self.orga1.slug, self.locale_event.slug), {
             'item': 'mail_text_order_placed',
@@ -284,7 +287,7 @@ class MailSettingPreviewTest(SoupTest):
         assert len(res['msgs']) == 2
         assert res['msgs']['en'] != res['msgs']['de-informal']
 
-    def test_localised_expire_date(self):
+    def test_localized_expire_date(self):
         dummy_text = '{expire_date}'
         response = self.client.post(self.target.format(
             self.orga1.slug, self.locale_event.slug), {
@@ -298,7 +301,7 @@ class MailSettingPreviewTest(SoupTest):
         assert len(res['msgs']) == 2
         assert res['msgs']['en'] != res['msgs']['de-informal']
 
-    def test_localised_payment_info(self):
+    def test_localized_payment_info(self):
         dummy_text = '{payment_info}'
         response = self.client.post(self.target.format(
             self.orga1.slug, self.locale_event.slug), {

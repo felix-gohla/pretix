@@ -3,7 +3,17 @@
 {% load rich_text %}
 {% load eventurl %}
 {% load urlreplace %}
+{% load thumb %}
 {% block title %}{% trans "Event list" %}{% endblock %}
+{% block custom_header %}
+    {{ block.super }}
+    <meta property="og:title" content="{{ organizer.name }}" />
+    {% if organizer_logo %}
+        <meta property="og:image" content="{{ organizer_logo|thumb:'5000x120' }}" />
+    {% endif %}
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="{% abseventurl organizer "presale:organizer.index" %}" />
+{% endblock %}
 {% block content %}
     <div>
 	{% if organizer_homepage_text %}
@@ -85,7 +95,7 @@
                             <span class="label label-warning">{% trans "Not yet on sale" %}</span>
                         {% endif %}
                     </td>
-                    <td class="text-right">
+                    <td class="text-right flip">
                         <a class="btn btn-primary" href="{{ url }}">
                             {% if e.has_subevents %}{% trans "Buy tickets" %}
                             {% elif e.presale_is_running and e.best_availability_state == 100 %}{% trans "Buy tickets" %}

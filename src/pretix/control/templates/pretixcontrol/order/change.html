@@ -1,6 +1,8 @@
 {% extends "pretixcontrol/event/base.html" %}
 {% load i18n %}
 {% load bootstrap3 %}
+{% load formset_tags %}
+{% load money %}
 {% block title %}
     {% blocktrans trimmed with code=order.code %}
         Change order: {{ code }}
@@ -63,130 +65,196 @@
                         {% endif %}
                         {% if position.addon_to %}
                             – <em>
-                                {% blocktrans trimmed with posid=position.addon_to.positionid %}
-                                    Add-On to position #{{ posid }}
-                                {% endblocktrans %}
-                            </em>
+                            {% blocktrans trimmed with posid=position.addon_to.positionid %}
+                                Add-On to position #{{ posid }}
+                            {% endblocktrans %}
+                        </em>
                         {% endif %}
                     </h3>
                 </div>
                 <div class="panel-body">
-                    <div class="form-inline form-order-change">
+                    <div class="form-order-change" data-pricecalc-endpoint="{% url "api-v1:orderposition-price_calc" organizer=order.event.organizer.slug event=order.event.slug pk=position.pk %}" {% if position.subevent %}data-subevent="{{ position.subevent.id }}{% endif %}">
                         {% bootstrap_form_errors position.form %}
                         {% if position.custom_error %}
                             <div class="alert alert-danger">
                                 {{ position.custom_error }}
                             </div>
                         {% endif %}
-                        <p class="help-block">
-                            {% trans "Ticket secret:" %} {{ position.secret|slice:":12" }}…
-                        </p>
-                        <div class="radio">
-                            <label>
-                                <input name="{{ position.form.prefix }}-operation" type="radio" value=""
-                                        {% if not position.form.operation.value %}checked="checked"{% endif %}>
-                                {% trans "Keep unchanged" %}
-                            </label>
+                        <div class="row">
+                            <div class="col-sm-5 col-sm-offset-3">
+                                <strong>{% trans "Current value" %}</strong>
+                            </div>
+                            <div class="col-sm-4">
+                                <strong>{% trans "Change to" %}</strong>
+                            </div>
                         </div>
-                        <div class="radio">
-                            <label>
-                                <input name="{{ position.form.prefix }}-operation" type="radio" value="product"
-                                        {% if position.form.operation.value == "product" %}checked="checked"{% endif %}>
-                                {% trans "Change product to" %}
-                                {% bootstrap_field position.form.itemvar layout='inline' %}
-                            </label>
-                            <label class="checkbox">
-                                {{ position.form.change_product_keep_price }}
-                                {% trans "Keep price the same" %}
-                            </label>
-                        </div>
+
                         {% if request.event.has_subevents %}
-                            <div class="radio">
-                                <label>
-                                    <input name="{{ position.form.prefix }}-operation" type="radio" value="subevent"
-                                            {% if position.form.operation.value == "subevent" %}checked="checked"{% endif %}>
-                                    {% trans "Change date to" context "subevent" %}
+                            <div class="row">
+                                <div class="col-sm-3">
+                                    <strong>{% trans "Date" context "subevent" %}</strong>
+                                </div>
+                                <div class="col-sm-5">
+                                    {{ position.subevent }}
+                                </div>
+                                <div class="col-sm-4">
                                     {% bootstrap_field position.form.subevent layout='inline' %}
-                                </label>
+                                </div>
                             </div>
                         {% endif %}
-                        <div class="radio">
-                            <label>
-                                <input name="{{ position.form.prefix }}-operation" type="radio" value="price"
-                                        {% if position.form.operation.value == "price" %}checked="checked"{% endif %}>
-                                {% trans "Change price to" %}
+
+                        {% if position.seat %}
+                            <div class="row">
+                                <div class="col-sm-3">
+                                    <strong>{% trans "Seat" %}</strong>
+                                </div>
+                                <div class="col-sm-5">
+                                    {{ position.seat }}
+                                </div>
+                                <div class="col-sm-4">
+                                    {% bootstrap_field position.form.seat layout='inline' %}
+                                </div>
+                            </div>
+                        {% endif %}
+                        <div class="row">
+                            <div class="col-sm-3">
+                                <strong>{% trans "Product" %}</strong>
+                            </div>
+                            <div class="col-sm-5">
+                                {{ position.item }}
+                                {% if position.variation %}
+                                    – {{ position.variation }}
+                                {% endif %}
+                            </div>
+                            <div class="col-sm-4">
+                                {% bootstrap_field position.form.itemvar layout='inline' %}
+                            </div>
+                        </div>
+
+                        <div class="row">
+                            <div class="col-sm-3">
+                                <strong>{% trans "Price" %}</strong>
+                            </div>
+                            <div class="col-sm-5">
+                                {{ position.price|money:request.event.currency }}
+                                {% if position.tax_rate %}
+                                    <br>
+                                    <small>
+                                        ({{ position.net_price|money:request.event.currency }}
+                                        + {{ position.tax_rate }}%)
+                                    </small>
+                                {% endif %}
+                            </div>
+                            <div class="col-sm-4 field-container">
                                 {% bootstrap_field position.form.price addon_after=request.event.currency layout='inline' %}
-                                {% if position.apply_tax %}
-                                    {% if position.item.tax_rule and not position.item.tax_rule.price_includes_tax %}
-                                        {% blocktrans trimmed with rate=position.item.tax_rule.rate name=position.item.tax_rule.name %}
-                                            <strong>plus</strong> {{ rate }}% {{ name }}
-                                        {% endblocktrans %}
-                                    {% elif position.item.tax_rule %}
-                                        {% blocktrans trimmed with rate=position.item.tax_rule.rate name=position.item.tax_rule.name %}
-                                            <strong>incl.</strong> {{ rate }}% {{ name }}
-                                        {% endblocktrans %}
-                                    {% endif %}
-                                {% else %}
-                                    {% trans "no taxes apply" %}
-                                {% endif %}
-                            </label>
+                                <small><strong>{% trans "including all taxes" %}</strong></small>
+                            </div>
                         </div>
-                        <div class="radio">
-                            <label>
-                                <input name="{{ position.form.prefix }}-operation" type="radio" value="split"
-                                        {% if position.form.operation.value == "split" %}checked="checked"{% endif %}>
-                                {% trans "Split into new order" %}
-                            </label>
+
+                        <div class="row">
+                            <div class="col-sm-3">
+                                <strong>{% trans "Ticket secret" %}</strong>
+                            </div>
+                            <div class="col-sm-5">
+                                {{ position.secret|slice:":12" }}…
+                            </div>
+                            <div class="col-sm-4">
+                                {% bootstrap_field position.form.operation_secret layout='inline' %}
+                            </div>
                         </div>
-                        <div class="radio">
-                            <label>
-                                <input name="{{ position.form.prefix }}-operation" type="radio" value="secret"
-                                        {% if position.form.operation.value == "secret" %}checked="checked"{% endif %}>
-                                {% trans "Generate a new secret" %}
-                            </label>
-                        </div>
-                        <div class="radio">
-                            <label>
-                                <input name="{{ position.form.prefix }}-operation" type="radio" value="cancel"
-                                        {% if position.form.operation.value == "cancel" %}checked="checked"{% endif %}>
-                                {% trans "Cancel position" %}
-                                {% if position.addons.exists %}
-                                    <em class="text-danger">
-                                        {% trans "Removing this position will also remove all add-ons to this position." %}
-                                    </em>
-                                {% endif %}
-                            </label>
-                        </div>
+
+                        {% bootstrap_field position.form.operation_cancel layout='inline' %}
+                        {% bootstrap_field position.form.operation_split layout='inline' %}
+                        {% if position.addons.exists %}
+                            <em class="text-danger">
+                                {% trans "Removing this position will also remove all add-ons to this position." %}
+                            </em>
+                        {% endif %}
                     </div>
                 </div>
             </div>
         {% endfor %}
-        <div class="panel panel-default items">
-            <div class="panel-heading">
-                <h3 class="panel-title">
-                    {% trans "Add product" %}
-                </h3>
-            </div>
-            <div class="panel-body">
-                <div class="form-horizontal">
-                    {% bootstrap_form_errors add_form %}
-                    {% if add_form.custom_error %}
-                        <div class="alert alert-danger">
-                            {{ add_form.custom_error }}
+
+
+        <div class="formset" data-formset data-formset-prefix="{{ add_formset.prefix }}">
+            {{ add_formset.management_form }}
+            {% bootstrap_formset_errors add_formset %}
+            <div data-formset-body>
+                {% for add_form in add_formset %}
+                    <div class="panel panel-default items" data-formset-form>
+                        <div class="panel-heading">
+                            <h3 class="panel-title">
+                                <button type="button" class="btn btn-danger btn-xs pull-right flip"
+                                        data-formset-delete-button>
+                                    <i class="fa fa-trash"></i>
+                                </button>
+                                {% trans "Add product" %}
+                                <div class="sr-only">
+                                    {{ add_form.id }}
+                                    {% bootstrap_field add_form.DELETE form_group_class="" layout="inline" %}
+                                </div>
+                            </h3>
                         </div>
-                    {% endif %}
-                    {% bootstrap_field add_form.do layout="control" %}
-                    {% bootstrap_field add_form.itemvar layout="control" %}
-                    {% bootstrap_field add_form.price addon_after=request.event.currency layout="control" %}
-                    {% if add_form.addon_to %}
-                        {% bootstrap_field add_form.addon_to layout="control" %}
-                    {% endif %}
-                    {% if add_form.subevent %}
-                        {% bootstrap_field add_form.subevent layout="control" %}
-                    {% endif %}
-                </div>
+                        <div class="panel-body">
+                            <div class="form-horizontal">
+                                {% bootstrap_form_errors add_form %}
+                                {% if add_form.custom_error %}
+                                    <div class="alert alert-danger">
+                                        {{ add_form.custom_error }}
+                                    </div>
+                                {% endif %}
+                                {% bootstrap_field add_form.itemvar layout="control" %}
+                                {% bootstrap_field add_form.price addon_after=request.event.currency layout="control" %}
+                                {% if add_form.addon_to %}
+                                    {% bootstrap_field add_form.addon_to layout="control" %}
+                                {% endif %}
+                                {% if add_form.subevent %}
+                                    {% bootstrap_field add_form.subevent layout="control" %}
+                                {% endif %}
+                                {% bootstrap_field add_form.seat layout="control" %}
+                            </div>
+                        </div>
+                    </div>
+                {% endfor %}
             </div>
+            <script type="form-template" data-formset-empty-form>
+                {% escapescript %}
+                    <div class="panel panel-default items" data-formset-form>
+                        <div class="panel-heading">
+                            <h3 class="panel-title">
+                                <button type="button" class="btn btn-danger btn-xs pull-right flip"
+                                        data-formset-delete-button>
+                                    <i class="fa fa-trash"></i>
+                                </button>
+                                {% trans "Add product" %}
+                                <div class="sr-only">
+                                    {{ add_formset.empty_form.id }}
+                                    {% bootstrap_field add_formset.empty_form.DELETE form_group_class="" layout="inline" %}
+                                </div>
+                            </h3>
+                        </div>
+                        <div class="panel-body">
+                            <div class="form-horizontal">
+                                {% bootstrap_field add_formset.empty_form.itemvar layout="control" %}
+                                {% bootstrap_field add_formset.empty_form.price addon_after=request.event.currency layout="control" %}
+                                {% if add_formset.empty_form.addon_to %}
+                                    {% bootstrap_field add_formset.empty_form.addon_to layout="control" %}
+                                {% endif %}
+                                {% if add_formset.empty_form.subevent %}
+                                    {% bootstrap_field add_formset.empty_form.subevent layout="control" %}
+                                {% endif %}
+                                {% bootstrap_field add_formset.empty_form.seat layout="control" %}
+                            </div>
+                        </div>
+                    </div>
+                {% endescapescript %}
+            </script>
+            <p>
+                <button type="button" class="btn btn-default" data-formset-add>
+                    <i class="fa fa-plus"></i> {% trans "Add product" %}</button>
+            </p>
         </div>
+
         <div class="panel panel-default items">
             <div class="panel-heading">
                 <h3 class="panel-title">
@@ -202,6 +270,7 @@
                         </div>
                     {% endif %}
                     {% bootstrap_field other_form.recalculate_taxes layout="control" %}
+                    {% bootstrap_field other_form.reissue_invoice layout="control" %}
                     {% bootstrap_field other_form.notify layout="control" %}
                 </div>
             </div>

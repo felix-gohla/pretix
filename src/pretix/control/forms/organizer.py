@@ -1,18 +1,24 @@
+from decimal import Decimal
 from urllib.parse import urlparse
 
 from django import forms
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.core.validators import RegexValidator
+from django.db.models import Q
 from django.utils.safestring import mark_safe
 from django.utils.translation import pgettext_lazy, ugettext_lazy as _
+from django_scopes.forms import SafeModelMultipleChoiceField
 from i18nfield.forms import I18nFormField, I18nTextarea
 
 from pretix.api.models import WebHook
 from pretix.api.webhooks import get_all_webhook_events
 from pretix.base.forms import I18nModelForm, SettingsForm
-from pretix.base.models import Device, Organizer, Team
-from pretix.control.forms import ExtFileField, MultipleLanguagesWidget
+from pretix.base.models import Device, GiftCard, Organizer, Team
+from pretix.control.forms import (
+    ExtFileField, FontSelect, MultipleLanguagesWidget,
+)
+from pretix.control.forms.event import SafeEventMultipleChoiceField
 from pretix.multidomain.models import KnownDomain
 from pretix.presale.style import get_fonts
 
@@ -133,19 +139,26 @@ class TeamForm(forms.ModelForm):
     def __init__(self, *args, **kwargs):
         organizer = kwargs.pop('organizer')
         super().__init__(*args, **kwargs)
-        self.fields['limit_events'].queryset = organizer.events.all()
+        self.fields['limit_events'].queryset = organizer.events.all().order_by(
+            '-has_subevents', '-date_from'
+        )
 
     class Meta:
         model = Team
         fields = ['name', 'all_events', 'limit_events', 'can_create_events',
                   'can_change_teams', 'can_change_organizer_settings',
+                  'can_manage_gift_cards',
                   'can_change_event_settings', 'can_change_items',
                   'can_view_orders', 'can_change_orders',
                   'can_view_vouchers', 'can_change_vouchers']
         widgets = {
             'limit_events': forms.CheckboxSelectMultiple(attrs={
-                'data-inverse-dependency': '#id_all_events'
+                'data-inverse-dependency': '#id_all_events',
+                'class': 'scrolling-multiple-choice scrolling-multiple-choice-large',
             }),
+        }
+        field_classes = {
+            'limit_events': SafeEventMultipleChoiceField
         }
 
     def clean(self):
@@ -165,15 +178,28 @@ class DeviceForm(forms.ModelForm):
     def __init__(self, *args, **kwargs):
         organizer = kwargs.pop('organizer')
         super().__init__(*args, **kwargs)
-        self.fields['limit_events'].queryset = organizer.events.all()
+        self.fields['limit_events'].queryset = organizer.events.all().order_by(
+            '-has_subevents', '-date_from'
+        )
+
+    def clean(self):
+        d = super().clean()
+        if not d['all_events'] and not d['limit_events']:
+            raise ValidationError(_('Your device will not have access to anything, please select some events.'))
+
+        return d
 
     class Meta:
         model = Device
         fields = ['name', 'all_events', 'limit_events']
         widgets = {
             'limit_events': forms.CheckboxSelectMultiple(attrs={
-                'data-inverse-dependency': '#id_all_events'
+                'data-inverse-dependency': '#id_all_events',
+                'class': 'scrolling-multiple-choice scrolling-multiple-choice-large',
             }),
+        }
+        field_classes = {
+            'limit_events': SafeEventMultipleChoiceField
         }
 
 
@@ -185,9 +211,6 @@ class OrganizerSettingsForm(SettingsForm):
         widget=I18nTextarea,
         help_text=_('Not displayed anywhere by default, but if you want to, you can use this e.g. in ticket templates.')
     )
-
-
-class OrganizerDisplaySettingsForm(SettingsForm):
     primary_color = forms.CharField(
         label=_("Primary color"),
         required=False,
@@ -260,6 +283,7 @@ class OrganizerDisplaySettingsForm(SettingsForm):
         choices=[
             ('Open Sans', 'Open Sans')
         ],
+        widget=FontSelect,
         help_text=_('Only respected by modern browsers.')
     )
     favicon = ExtFileField(
@@ -304,3 +328,33 @@ class WebHookForm(forms.ModelForm):
                 'data-inverse-dependency': '#id_all_events'
             }),
         }
+        field_classes = {
+            'limit_events': SafeModelMultipleChoiceField
+        }
+
+
+class GiftCardCreateForm(forms.ModelForm):
+    value = forms.DecimalField(
+        label=_('Gift card value'),
+        min_value=Decimal('0.00')
+    )
+
+    def __init__(self, *args, **kwargs):
+        self.organizer = kwargs.pop('organizer')
+        super().__init__(*args, **kwargs)
+
+    def clean_secret(self):
+        s = self.cleaned_data['secret']
+        if GiftCard.objects.filter(
+            secret__iexact=s
+        ).filter(
+            Q(issuer=self.organizer) | Q(issuer__gift_card_collector_acceptance__collector=self.organizer)
+        ).exists():
+            raise ValidationError(
+                _('A gift card with the same secret already exists in your or an affiliated organizer account.')
+            )
+        return s
+
+    class Meta:
+        model = GiftCard
+        fields = ['secret', 'currency', 'testmode']

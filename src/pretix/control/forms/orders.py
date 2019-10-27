@@ -8,9 +8,11 @@ from django.urls import reverse
 from django.utils.timezone import now
 from django.utils.translation import pgettext_lazy, ugettext_lazy as _
 
+from pretix.base.email import get_available_placeholders
 from pretix.base.forms import I18nModelForm, PlaceholderValidator
+from pretix.base.forms.widgets import DatePickerWidget
 from pretix.base.models import (
-    InvoiceAddress, Item, ItemAddOn, Order, OrderPosition,
+    InvoiceAddress, ItemAddOn, Order, OrderPosition, Seat,
 )
 from pretix.base.models.event import SubEvent
 from pretix.base.services.pricing import get_price
@@ -105,7 +107,7 @@ class CancelForm(ConfirmPaymentForm):
             del self.fields['cancellation_fee']
 
     def clean_cancellation_fee(self):
-        val = self.cleaned_data['cancellation_fee']
+        val = self.cleaned_data['cancellation_fee'] or Decimal('0.00')
         if val > self.instance.payment_refund_sum:
             raise ValidationError(_('The cancellation fee cannot be higher than the payment credit of this order.'))
         return val
@@ -117,6 +119,12 @@ class MarkPaidForm(ConfirmPaymentForm):
         max_digits=10, decimal_places=2,
         localize=True,
         label=_('Payment amount'),
+    )
+    payment_date = forms.DateField(
+        required=True,
+        label=_('Payment date'),
+        widget=DatePickerWidget(),
+        initial=now
     )
 
     def __init__(self, *args, **kwargs):
@@ -150,15 +158,6 @@ class CommentForm(I18nModelForm):
         }
 
 
-class SubEventChoiceField(forms.ModelChoiceField):
-    def label_from_instance(self, obj):
-        p = get_price(self.instance.item, self.instance.variation,
-                      voucher=self.instance.voucher,
-                      subevent=obj)
-        return '{} – {} ({})'.format(obj.name, obj.get_date_range_display(),
-                                     p.print(self.instance.order.event.currency))
-
-
 class OtherOperationsForm(forms.Form):
     recalculate_taxes = forms.BooleanField(
         label=_('Re-calculate taxes'),
@@ -167,6 +166,15 @@ class OtherOperationsForm(forms.Form):
             'This operation re-checks if taxes should be paid to the items due to e.g. configured reverse charge rules '
             'and changes the prices and tax values accordingly. This is useful e.g. after an invoice address change. '
             'Use with care and only if you need to. Note that rounding differences might occur in this procedure.'
+        )
+    )
+    reissue_invoice = forms.BooleanField(
+        label=_('Issue a new invoice if required'),
+        required=False,
+        initial=True,
+        help_text=_(
+            'If an invoice exists for this order and this operation would change its contents, the old invoice will '
+            'be cancelled and a new invoice will be issued.'
         )
     )
     notify = forms.BooleanField(
@@ -188,17 +196,19 @@ class OtherOperationsForm(forms.Form):
 
 
 class OrderPositionAddForm(forms.Form):
-    do = forms.BooleanField(
-        label=_('Add a new product to the order'),
-        required=False
-    )
     itemvar = forms.ChoiceField(
         label=_('Product')
     )
     addon_to = forms.ModelChoiceField(
-        OrderPosition.objects.none(),
+        OrderPosition.all.none(),
         required=False,
         label=_('Add-on to'),
+    )
+    seat = forms.ModelChoiceField(
+        Seat.objects.none(),
+        required=False,
+        label=_('Seat'),
+        empty_label=_('General admission')
     )
     price = forms.DecimalField(
         required=False,
@@ -245,6 +255,19 @@ class OrderPositionAddForm(forms.Form):
         else:
             del self.fields['addon_to']
 
+        self.fields['seat'].queryset = order.event.seats.all()
+        self.fields['seat'].widget = Select2(
+            attrs={
+                'data-model-select2': 'seat',
+                'data-select2-url': reverse('control:event.seats.select2', kwargs={
+                    'event': order.event.slug,
+                    'organizer': order.event.organizer.slug,
+                }),
+                'data-placeholder': _('General admission')
+            }
+        )
+        self.fields['seat'].widget.choices = self.fields['seat'].choices
+
         if order.event.has_subevents:
             self.fields['subevent'].queryset = order.event.subevents.all()
             self.fields['subevent'].widget = Select2(
@@ -264,13 +287,41 @@ class OrderPositionAddForm(forms.Form):
         change_decimal_field(self.fields['price'], order.event.currency)
 
 
+class OrderPositionAddFormset(forms.BaseFormSet):
+    def __init__(self, *args, **kwargs):
+        self.order = kwargs.pop('order', None)
+        super().__init__(*args, **kwargs)
+
+    def _construct_form(self, i, **kwargs):
+        kwargs['order'] = self.order
+        return super()._construct_form(i, **kwargs)
+
+    @property
+    def empty_form(self):
+        form = self.form(
+            auto_id=self.auto_id,
+            prefix=self.add_prefix('__prefix__'),
+            empty_permitted=True,
+            use_required_attribute=False,
+            order=self.order,
+        )
+        self.add_fields(form, None)
+        return form
+
+
 class OrderPositionChangeForm(forms.Form):
-    itemvar = forms.ChoiceField()
-    subevent = SubEventChoiceField(
+    itemvar = forms.ChoiceField(
+        required=False,
+    )
+    subevent = forms.ModelChoiceField(
         SubEvent.objects.none(),
-        label=pgettext_lazy('subevent', 'New date'),
-        required=True,
-        empty_label=None
+        required=False,
+        empty_label=_('(Unchanged)')
+    )
+    seat = forms.ModelChoiceField(
+        Seat.objects.none(),
+        required=False,
+        empty_label=_('(Unchanged)')
     )
     price = forms.DecimalField(
         required=False,
@@ -278,53 +329,62 @@ class OrderPositionChangeForm(forms.Form):
         localize=True,
         label=_('New price (gross)')
     )
-    operation = forms.ChoiceField(
+    operation_secret = forms.BooleanField(
         required=False,
-        widget=forms.RadioSelect,
-        choices=(
-            ('product', 'Change product'),
-            ('price', 'Change price'),
-            ('subevent', 'Change event date'),
-            ('cancel', 'Remove product'),
-            ('split', 'Split into new order'),
-            ('secret', 'Regenerate secret'),
-        )
+        label=_('Generate a new secret')
     )
-    change_product_keep_price = forms.BooleanField(required=False)
+    operation_cancel = forms.BooleanField(
+        required=False,
+        label=_('Cancel this position')
+    )
+    operation_split = forms.BooleanField(
+        required=False,
+        label=_('Split into new order')
+    )
 
     def __init__(self, *args, **kwargs):
         instance = kwargs.pop('instance')
         initial = kwargs.get('initial', {})
 
-        try:
-            ia = instance.order.invoice_address
-        except InvoiceAddress.DoesNotExist:
-            ia = None
-
-        if instance:
-            try:
-                if instance.variation:
-                    initial['itemvar'] = '%d-%d' % (instance.item.pk, instance.variation.pk)
-                elif instance.item:
-                    initial['itemvar'] = str(instance.item.pk)
-            except Item.DoesNotExist:
-                pass
-
-            if instance.item.tax_rule and not instance.item.tax_rule.price_includes_tax:
-                initial['price'] = instance.price - instance.tax_value
-            else:
-                initial['price'] = instance.price
-        initial['subevent'] = instance.subevent
+        initial['price'] = instance.price
 
         kwargs['initial'] = initial
         super().__init__(*args, **kwargs)
         if instance.order.event.has_subevents:
-            self.fields['subevent'].instance = instance
             self.fields['subevent'].queryset = instance.order.event.subevents.all()
+            self.fields['subevent'].widget = Select2(
+                attrs={
+                    'data-model-select2': 'event',
+                    'data-select2-url': reverse('control:event.subevents.select2', kwargs={
+                        'event': instance.order.event.slug,
+                        'organizer': instance.order.event.organizer.slug,
+                    }),
+                    'data-placeholder': _('(Unchanged)')
+                }
+            )
+            self.fields['subevent'].widget.choices = self.fields['subevent'].choices
         else:
             del self.fields['subevent']
 
-        choices = []
+        if instance.seat:
+            self.fields['seat'].queryset = instance.order.event.seats.all()
+            self.fields['seat'].widget = Select2(
+                attrs={
+                    'data-model-select2': 'seat',
+                    'data-select2-url': reverse('control:event.seats.select2', kwargs={
+                        'event': instance.order.event.slug,
+                        'organizer': instance.order.event.organizer.slug,
+                    }),
+                    'data-placeholder': _('(Unchanged)')
+                }
+            )
+            self.fields['seat'].widget.choices = self.fields['seat'].choices
+        else:
+            del self.fields['seat']
+
+        choices = [
+            ('', _('(Unchanged)'))
+        ]
         for i in instance.order.event.items.prefetch_related('variations').all():
             pname = str(i)
             if not i.is_available():
@@ -333,14 +393,10 @@ class OrderPositionChangeForm(forms.Form):
 
             if variations:
                 for v in variations:
-                    p = get_price(i, v, voucher=instance.voucher, subevent=instance.subevent,
-                                  invoice_address=ia)
                     choices.append(('%d-%d' % (i.pk, v.pk),
-                                    '%s – %s (%s)' % (pname, v.value, p.print(instance.order.event.currency))))
+                                    '%s – %s' % (pname, v.value)))
             else:
-                p = get_price(i, None, voucher=instance.voucher, subevent=instance.subevent,
-                              invoice_address=ia)
-                choices.append((str(i.pk), '%s (%s)' % (pname, p.print(instance.order.event.currency))))
+                choices.append((str(i.pk), pname))
         self.fields['itemvar'].choices = choices
         change_decimal_field(self.fields['price'], instance.order.event.currency)
 
@@ -358,7 +414,7 @@ class OrderContactForm(forms.ModelForm):
 
     class Meta:
         model = Order
-        fields = ['email']
+        fields = ['email', 'email_known_to_work']
 
 
 class OrderLocaleForm(forms.ModelForm):
@@ -380,8 +436,24 @@ class OrderMailForm(forms.Form):
         required=True
     )
 
+    def _set_field_placeholders(self, fn, base_parameters):
+        phs = [
+            '{%s}' % p
+            for p in sorted(get_available_placeholders(self.order.event, base_parameters).keys())
+        ]
+        ht = _('Available placeholders: {list}').format(
+            list=', '.join(phs)
+        )
+        if self.fields[fn].help_text:
+            self.fields[fn].help_text += ' ' + str(ht)
+        else:
+            self.fields[fn].help_text = ht
+        self.fields[fn].validators.append(
+            PlaceholderValidator(phs)
+        )
+
     def __init__(self, *args, **kwargs):
-        order = kwargs.pop('order')
+        order = self.order = kwargs.pop('order')
         super().__init__(*args, **kwargs)
         self.fields['sendto'] = forms.EmailField(
             label=_("Recipient"),
@@ -394,11 +466,8 @@ class OrderMailForm(forms.Form):
             required=True,
             widget=forms.Textarea,
             initial=order.event.settings.mail_text_order_custom_mail.localize(order.locale),
-            help_text=_("Available placeholders: {expire_date}, {event}, {code}, {date}, {url}, "
-                        "{invoice_name}, {invoice_company}"),
-            validators=[PlaceholderValidator(['{expire_date}', '{event}', '{code}', '{date}', '{url}',
-                                              '{invoice_name}', '{invoice_company}'])]
         )
+        self._set_field_placeholders('message', ['event', 'order'])
 
 
 class OrderRefundForm(forms.Form):

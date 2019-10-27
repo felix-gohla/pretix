@@ -4,11 +4,12 @@ from django.core.exceptions import ValidationError
 from django.db import models, transaction
 from django.utils.timezone import now
 from django.utils.translation import pgettext_lazy, ugettext_lazy as _
+from django_scopes import ScopedManager
 
+from pretix.base.email import get_email_context
 from pretix.base.i18n import language
 from pretix.base.models import Voucher
 from pretix.base.services.mail import mail
-from pretix.multidomain.urlreverse import build_absolute_uri
 
 from .base import LoggedModel
 from .event import Event, SubEvent
@@ -66,6 +67,8 @@ class WaitingListEntry(LoggedModel):
         default='en'
     )
     priority = models.IntegerField(default=0)
+
+    objects = ScopedManager(organizer='event__organizer')
 
     class Meta:
         verbose_name = _("Waiting list entry")
@@ -127,13 +130,7 @@ class WaitingListEntry(LoggedModel):
                 self.email,
                 _('You have been selected from the waitinglist for {event}').format(event=str(self.event)),
                 self.event.settings.mail_text_waiting_list,
-                {
-                    'event': self.event.name,
-                    'url': build_absolute_uri(self.event, 'presale:event.redeem') + '?voucher=' + self.voucher.code,
-                    'code': self.voucher.code,
-                    'product': str(self.item) + (' - ' + str(self.variation) if self.variation else ''),
-                    'hours': self.event.settings.waiting_list_hours,
-                },
+                get_email_context(event=self.event, waiting_list_entry=self),
                 self.event,
                 locale=self.locale
             )

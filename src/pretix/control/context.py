@@ -5,6 +5,7 @@ from django.conf import settings
 from django.db.models import Q
 from django.urls import Resolver404, get_script_prefix, resolve
 from django.utils.translation import get_language
+from django_scopes import scope
 
 from pretix.base.models.auth import StaffSession
 from pretix.base.settings import GlobalSettingsObject
@@ -53,10 +54,11 @@ def contextprocessor(request):
         ctx['has_domain'] = request.event.organizer.domains.exists()
 
         if not request.event.testmode:
-            complain_testmode_orders = request.event.cache.get('complain_testmode_orders')
-            if complain_testmode_orders is None:
-                complain_testmode_orders = request.event.orders.filter(testmode=True).exists()
-                request.event.cache.set('complain_testmode_orders', complain_testmode_orders, 30)
+            with scope(organizer=request.organizer):
+                complain_testmode_orders = request.event.cache.get('complain_testmode_orders')
+                if complain_testmode_orders is None:
+                    complain_testmode_orders = request.event.orders.filter(testmode=True).exists()
+                    request.event.cache.set('complain_testmode_orders', complain_testmode_orders, 30)
             ctx['complain_testmode_orders'] = complain_testmode_orders
         else:
             ctx['complain_testmode_orders'] = False
@@ -96,11 +98,6 @@ def contextprocessor(request):
     ctx['js_time_format'] = get_javascript_format('TIME_INPUT_FORMATS')
     ctx['js_locale'] = get_moment_locale()
     ctx['select2locale'] = get_language()[:2]
-
-    if settings.DEBUG and 'runserver' not in sys.argv:
-        ctx['debug_warning'] = True
-    elif 'runserver' in sys.argv:
-        ctx['development_warning'] = True
 
     ctx['warning_update_available'] = False
     ctx['warning_update_check_active'] = False
