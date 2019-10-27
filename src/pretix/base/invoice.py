@@ -657,7 +657,6 @@ class ClassicInvoiceRenderer(BaseReportlabInvoiceRenderer):
         return story
 
 
-<<<<<<< HEAD
 class ClassicCombiningInvoiceRenderer(ClassicInvoiceRenderer):
     identifier = 'classiccoombining'
     verbose_name = pgettext('invoice', 'Classic combining renderer (pretix 1.0)')
@@ -871,7 +870,6 @@ class ClassicCombiningInvoiceRenderer(ClassicInvoiceRenderer):
             ))
 
         return story
-=======
 class Modern1Renderer(ClassicInvoiceRenderer):
     identifier = 'modern1'
     verbose_name = ugettext_lazy('Modern Invoice Renderer (pretix 2.7)')
@@ -978,13 +976,8 @@ class Modern1Renderer(ClassicInvoiceRenderer):
         else:
             textobject.textLine(pgettext('invoice', 'Invoice date'))
         canvas.drawText(textobject)
->>>>>>> master
 
 
 @receiver(register_invoice_renderers, dispatch_uid="invoice_renderer_classic")
 def recv_classic(sender, **kwargs):
-<<<<<<< HEAD
-    return [ClassicInvoiceRenderer, ClassicCombiningInvoiceRenderer]
-=======
-    return [ClassicInvoiceRenderer, Modern1Renderer]
->>>>>>> master
+    return [ClassicInvoiceRenderer, ClassicCombiningInvoiceRenderer, Modern1Renderer]
